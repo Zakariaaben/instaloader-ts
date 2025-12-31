@@ -6,11 +6,13 @@ A TypeScript port of the popular [Instaloader](https://github.com/instaloader/in
 
 ## Features
 
-- **Download Media**: Posts, videos, stories, highlights, reels, and sidecars.
-- **Metadata**: Fetch profile info, captions, comments, likes, and more.
-- **Authentication**: Support for login, Two-Factor Authentication (2FA), and session management.
-- **Session Handling**: Load/save sessions to files or import Firefox cookies.
-- **High Performance**: Built on [Bun](https://bun.sh) for speed.
+- **Dual API Design**: Choose between Promise-based client API or Effect-based functional API
+- **Full Type Safety**: Result and Option types preserve error information in return signatures
+- **Download Media**: Posts, videos, stories, highlights, reels, and sidecars
+- **Metadata**: Fetch profile info, captions, comments, likes, and more
+- **Authentication**: Support for login, Two-Factor Authentication (2FA), and session management
+- **Session Handling**: Load/save sessions programmatically or import Firefox cookies
+- **High Performance**: Built on [Bun](https://bun.sh) for speed
 
 ## Prerequisites
 
@@ -29,97 +31,368 @@ bun install
 
 ## Quick Start
 
-### Basic Usage (Anonymous)
+### Promise-based API (Recommended)
 
-You can use `Instaloader` anonymously for public profiles, but some data may be restricted.
+The default export provides a clean, Promise-based API with full type safety using `Result` and `Option` types.
 
 ```typescript
-import { Instaloader, Profile } from "./src/index";
+import { 
+  Instaloader, 
+  isErr, 
+  isSome,
+  type SessionData 
+} from "instaloader-ts";
 
 async function main() {
-  const loader = new Instaloader();
-  const username = "instagram";
+  // Create client
+  const loaderResult = await Instaloader.create({ quiet: false });
+  if (isErr(loaderResult)) {
+    console.error("Failed to create Instaloader");
+    return;
+  }
+  const loader = loaderResult.value;
 
-  console.log(`Fetching profile @${username}...`);
-  const profile = await Profile.fromUsername(loader.context, username);
+  // Fetch a profile
+  const profileResult = await loader.getProfile("instagram");
+  if (isErr(profileResult)) {
+    console.error("Error:", profileResult.error._tag);
+    return;
+  }
+  
+  const profile = profileResult.value;
+  console.log(`Username: ${profile.username}`);
+  console.log(`Followers: ${isSome(profile.followers) ? profile.followers.value : "N/A"}`);
+  console.log(`Posts: ${isSome(profile.mediacount) ? profile.mediacount.value : "N/A"}`);
 
-  console.log(`Followers: ${await profile.getFollowers()}`);
-  console.log(`Posts: ${await profile.getMediacount()}`);
-
-  // Iterate over posts
-  for await (const post of profile.getPosts()) {
-    console.log(`Post: ${post.shortcode} - Likes: ${post.likes}`);
-    // Break after 5 posts to avoid hitting limits
-    break; 
+  // Iterate over posts with type-safe error handling
+  for await (const postResult of profile.getPosts()) {
+    if (isErr(postResult)) {
+      console.error("Error fetching post:", postResult.error._tag);
+      continue;
+    }
+    
+    const post = postResult.value;
+    console.log(`Post: ${post.shortcode}`);
+    console.log(`  Likes: ${isSome(post.likes) ? post.likes.value : "N/A"}`);
+    console.log(`  Type: ${post.typename}`);
+    
+    // Break after a few posts
+    break;
   }
 }
 
 main();
 ```
 
-### Logging In
+### Effect-based API (Advanced)
 
-Login is required for viewing private profiles, stories, and avoiding strict rate limits.
+For users who prefer functional programming with Effect:
 
 ```typescript
-import { Instaloader } from "./src/index";
+import { Effect, Stream, pipe, Option } from "effect";
+import {
+  makeInstaloaderContext,
+  profileFromUsername,
+  profileUsername,
+  profileFollowers,
+  profileGetPostsStream,
+  postFromNodeSync,
+  postShortcode,
+  type ProfileData,
+  type JsonNode,
+} from "instaloader-ts/effect";
 
-const loader = new Instaloader();
-
-try {
-  await loader.login("your_username", "your_password");
-  console.log("Logged in successfully!");
+const program = Effect.gen(function* () {
+  const ctx = yield* makeInstaloaderContext({ quiet: false });
   
-  // Save session for future use
-  await loader.saveSessionToFile();
-} catch (error) {
-  if (error.name === "TwoFactorAuthRequiredException") {
-    // Handle 2FA
-    await loader.twoFactorLogin("123456"); 
+  const profile = yield* profileFromUsername(ctx, "instagram");
+  
+  console.log(`Username: ${profileUsername(profile)}`);
+  const followers = profileFollowers(profile);
+  console.log(`Followers: ${Option.isSome(followers) ? followers.value : "N/A"}`);
+  
+  // Get posts stream
+  const postsStream = yield* profileGetPostsStream(
+    ctx,
+    profile,
+    (node: JsonNode, _profile: ProfileData) => postFromNodeSync(node)
+  );
+  
+  // Process first 5 posts
+  const posts = yield* pipe(
+    postsStream,
+    Stream.take(5),
+    Stream.runCollect,
+    Effect.map((chunk) => [...chunk])
+  );
+  
+  for (const post of posts) {
+    console.log(`Post: ${postShortcode(post)}`);
   }
+  
+  yield* ctx.close;
+});
+
+Effect.runPromise(program);
+```
+
+## API Reference
+
+### Instaloader Class (Promise API)
+
+The main client class for interacting with Instagram.
+
+#### Creating an Instance
+
+```typescript
+const result = await Instaloader.create(options?: InstaloaderOptions);
+```
+
+**Options:**
+- `sleep?: boolean` - Enable rate-limit sleep between requests (default: true)
+- `quiet?: boolean` - Suppress log output (default: false)
+- `userAgent?: string` - Custom user agent string
+- `maxConnectionAttempts?: number` - Maximum retry attempts (default: 3)
+- `requestTimeout?: number` - Request timeout in ms (default: 300000)
+- `iphoneSupport?: boolean` - Enable iPhone API support (default: true)
+
+#### Authentication
+
+```typescript
+// Login with credentials
+const loginResult = await loader.login(username, password);
+
+// Complete 2FA
+const twoFactorResult = await loader.twoFactorLogin(code);
+
+// Check login status
+const isLoggedIn = await loader.isLoggedIn();
+
+// Get current username
+const username = await loader.getUsername();
+
+// Test if session is valid
+const testResult = await loader.testLogin();
+```
+
+#### Session Management
+
+```typescript
+// Load session data
+await loader.loadSessionData(username, sessionData);
+
+// Get current session data (for saving)
+const sessionResult = await loader.getSessionData();
+```
+
+#### Fetching Data
+
+```typescript
+// Get profile by username
+const profileResult = await loader.getProfile(username);
+
+// Get profile by ID
+const profileResult = await loader.getProfileById(profileId);
+
+// Get your own profile (requires login)
+const ownProfileResult = await loader.getOwnProfile();
+
+// Get post by shortcode
+const postResult = await loader.getPost(shortcode);
+
+// Get post by media ID
+const postResult = await loader.getPostByMediaId(mediaid);
+
+// Get hashtag
+const hashtagResult = await loader.getHashtag(name);
+
+// Get stories (requires login)
+const storiesResult = await loader.getStories(userIds?);
+
+// Get highlights (requires login)
+const highlightsResult = await loader.getHighlights(userIdOrProfile);
+
+// Get feed posts (requires login)
+const feedResult = await loader.getFeedPosts();
+```
+
+### Profile Interface
+
+```typescript
+interface Profile {
+  readonly userid: number;
+  readonly username: string;
+  readonly fullName: Option<string>;
+  readonly biography: Option<string>;
+  readonly followers: Option<number>;
+  readonly followees: Option<number>;
+  readonly mediacount: Option<number>;
+  readonly isPrivate: Option<boolean>;
+  readonly isVerified: Option<boolean>;
+  readonly profilePicUrl: Option<string>;
+  readonly externalUrl: Option<string | null>;
+  readonly isBusinessAccount: Option<boolean>;
+  readonly businessCategoryName: Option<string>;
+  readonly biographyHashtags: string[];
+  readonly biographyMentions: string[];
+  readonly followedByViewer: Option<boolean>;
+  readonly followsViewer: Option<boolean>;
+  
+  // Methods returning iterables
+  getPosts(): TypedAsyncIterable<PostError, Post>;
+  getTaggedPosts(): TypedAsyncIterable<PostError, Post>;
+  getReels(): TypedAsyncIterable<PostError, Post>;
+  getIgtvPosts(): TypedAsyncIterable<PostError, Post>;
+  getSavedPosts(): Promise<Result<LoginRequiredError, TypedAsyncIterable<PostError, Post>>>;
+  getProfilePicUrl(): Promise<Result<ProfileFetchError, string>>;
+  getHasPublicStory(): Promise<Result<ProfileFetchError, boolean>>;
 }
 ```
 
-## API Overview
+### Post Interface
 
-### `Instaloader`
+```typescript
+interface Post {
+  readonly shortcode: string;
+  readonly mediaid: number;
+  readonly typename: string;  // "GraphImage" | "GraphVideo" | "GraphSidecar"
+  readonly url: string;
+  readonly caption: string | null;
+  readonly likes: Option<number>;
+  readonly comments: Option<number>;
+  readonly isVideo: boolean;
+  readonly dateUtc: Option<Date>;
+  readonly dateLocal: Option<Date>;
+  readonly title: string | null;
+  readonly videoUrl: Option<string>;
+  readonly videoViewCount: Option<number>;
+  readonly videoDuration: Option<number>;
+  readonly mediacount: number;
+  readonly isSponsored: boolean;
+  readonly isPinned: boolean;
+  readonly captionHashtags: string[];
+  readonly captionMentions: string[];
+  readonly taggedUsers: string[];
+  readonly ownerUsername: Option<string>;
+  readonly ownerId: Option<number>;
+  
+  // Async methods
+  getSidecarNodes(start?, end?): Promise<Result<PostError, SidecarNode[]>>;
+  getVideoUrl(): Promise<Result<PostError, string | null>>;
+  getLocation(): Promise<Result<PostError | LoginRequiredError, PostLocation | null>>;
+  getOwnerProfile(): Promise<Result<PostError, Profile>>;
+}
+```
 
-The main class that handles the connection and configuration.
+### Result Type
 
-- `new Instaloader(options)`: Initialize the loader. Options include `downloadVideos`, `downloadGeotags`, `saveMetadata`, etc.
-- `loader.login(user, pass)`: Login to Instagram.
-- `loader.loadSessionFromFile(username)`: Restore a previous session.
-- `loader.saveSessionToFile(filename)`: Save current session.
-- `loader.downloadPost(post, target)`: Download a post to a target directory.
-- `loader.downloadProfile(profile, options)`: Download entire profile content.
-- `loader.getStories(userids)`: Get stories for specified user IDs (requires login).
-- `loader.getHighlights(profile)`: Get highlights for a profile (requires login).
+A discriminated union for type-safe error handling:
 
-### `Profile`
+```typescript
+type Result<E, A> = Ok<A> | Err<E>;
 
-Represents an Instagram user profile.
+// Check success/failure
+if (isOk(result)) {
+  console.log(result.value);
+}
+if (isErr(result)) {
+  console.log(result.error._tag);
+}
 
-- `Profile.fromUsername(context, username)`: Fetch a profile.
-- `profile.getPosts()`: Returns an iterator of `Post` objects.
-- `profile.getReels()`: Returns an iterator of reels.
-- `profile.getTaggedPosts()`: Returns an iterator of posts where the user is tagged.
-- `profile.getIgtvPosts()`: Returns an iterator of IGTV posts.
+// Or use the boolean properties
+if (result.ok) {
+  console.log(result.value);
+}
 
-### `Post`
+// Pattern matching
+const value = match(result, {
+  ok: (value) => value,
+  err: (error) => defaultValue,
+});
+```
 
-Represents a single media post (image, video, or sidecar).
+### Option Type
 
-- `post.url`: The URL of the media.
-- `post.caption`: The post caption.
-- `post.likes`: Like count.
-- `post.comments`: Comment count.
-- `post.typename`: "GraphImage", "GraphVideo", or "GraphSidecar".
-- `post.getVideoUrl()`: Get video URL if it's a video.
-- `post.getSidecarNodes()`: Get children nodes if it's a sidecar (carousel).
+For optional values (not errors):
 
-## Scripts
+```typescript
+type Option<A> = Some<A> | None;
 
-This project includes several utility scripts in the `scripts/` directory:
+// Check presence
+if (isSome(option)) {
+  console.log(option.value);
+}
+
+// Get with default
+const value = getOrElse(option, defaultValue);
+```
+
+### TypedAsyncIterable
+
+Type-safe async iteration with error preservation:
+
+```typescript
+const posts = profile.getPosts();
+
+// Iterate with error handling
+for await (const result of posts) {
+  if (isErr(result)) {
+    console.error(result.error._tag);
+    continue;
+  }
+  console.log(result.value.shortcode);
+}
+
+// Collect all (stops on first error)
+const allResult = await posts.collect();
+
+// Take first N items
+const firstTen = await posts.take(10);
+
+// Transform
+const shortcodes = posts.map(post => post.shortcode);
+const videos = posts.filter(post => post.isVideo);
+```
+
+### Error Types
+
+All errors extend `InstaloaderBaseError` and have a `_tag` property for discrimination:
+
+```typescript
+// Authentication errors
+type AuthenticationError =
+  | LoginRequiredError
+  | LoginError
+  | TwoFactorAuthRequiredError
+  | BadCredentialsError;
+
+// Connection errors
+type ConnectionErrors =
+  | ConnectionError
+  | TooManyRequestsError;
+
+// Query errors
+type QueryError =
+  | QueryReturnedBadRequestError
+  | QueryReturnedForbiddenError
+  | QueryReturnedNotFoundError;
+
+// Profile errors  
+type ProfileError =
+  | ProfileNotExistsError
+  | ProfileHasNoPicsError
+  | PrivateProfileNotFollowedError;
+
+// Type guards available
+isAuthenticationError(error)
+isConnectionError(error)
+isQueryError(error)
+isProfileError(error)
+```
+
+## Example Scripts
+
+The `scripts/` directory contains example usage:
 
 ### Login & Save Session
 ```bash
@@ -127,17 +400,22 @@ bun run scripts/login.ts <username>
 # Prompts for password and handles 2FA
 ```
 
-### Fetch User Posts
+### Fetch User Posts (Promise API)
 ```bash
-# Edit the script to change target username first
+bun run scripts/get-user-posts-promise.ts
+# Uses the Promise-based client API
+```
+
+### Fetch User Posts (Effect API)
+```bash
 bun run scripts/get-user-posts.ts
+# Uses the Effect-based API
 ```
 
 ### Import Firefox Cookies
-Import cookies from a Firefox session to avoid logging in directly.
 ```bash
-# Automatically finds Firefox cookies database and imports session
 bun run scripts/import-firefox-cookies.ts
+# Imports session from Firefox cookies database
 ```
 
 ## Development
@@ -146,11 +424,29 @@ bun run scripts/import-firefox-cookies.ts
 # Run tests
 bun test
 
+# Type check
+bun run typecheck
+
 # Lint code
 bun run lint
 
 # Format code
 bun run format
+```
+
+## Package Exports
+
+The package supports multiple entry points:
+
+```typescript
+// Default: Promise-based client API
+import { Instaloader, Result, Option } from "instaloader-ts";
+
+// Effect-based API
+import { makeInstaloaderContext, profileFromUsername } from "instaloader-ts/effect";
+
+// Error classes only
+import { ProfileNotExistsError, ConnectionError } from "instaloader-ts/errors";
 ```
 
 ## Disclaimer
