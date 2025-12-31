@@ -3,7 +3,14 @@ import { Database } from "bun:sqlite";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { Instaloader } from "../src/index.ts";
+import { Effect, pipe } from "effect";
+import {
+  makeInstaloaderContext,
+  saveSessionToFileEffect,
+  PlatformLayer,
+  type CookieJar,
+  type InstaloaderContextShape,
+} from "../src/index.ts";
 
 function findFirefoxCookiesDb(): string | null {
   const homeDir = os.homedir();
@@ -33,13 +40,13 @@ function findFirefoxCookiesDb(): string | null {
   return null;
 }
 
-function getInstagramCookies(dbPath: string): Record<string, string> {
+function getInstagramCookies(dbPath: string): CookieJar {
   const tempPath = `/tmp/firefox_cookies_${Date.now()}.sqlite`;
   fs.copyFileSync(dbPath, tempPath);
   
   const db = new Database(tempPath, { readonly: true });
   
-  const cookies: Record<string, string> = {};
+  const cookies: CookieJar = {};
   
   try {
     const rows = db.query(`
@@ -84,14 +91,14 @@ async function main() {
   }
 
   console.log(`Found ${Object.keys(cookies).length} Instagram cookies.`);
-  
-  const loader = new Instaloader({ quiet: false });
-  
-  try {
-    loader.context.loadSession("", cookies);
+
+  const program = Effect.gen(function* () {
+    const ctx: InstaloaderContextShape = yield* makeInstaloaderContext({ quiet: false });
+    
+    yield* ctx.loadSession("", cookies);
     
     console.log("Testing session...");
-    const loggedInUser = await loader.testLogin();
+    const loggedInUser = yield* ctx.testLogin;
     
     if (!loggedInUser) {
       console.error("Session is invalid or expired. Please log into Instagram in Firefox again.");
@@ -104,16 +111,24 @@ async function main() {
 
     console.log(`Logged in as: ${loggedInUser}`);
     
-    loader.context.loadSession(loggedInUser, cookies);
-    await loader.saveSessionToFile();
+    yield* ctx.loadSession(loggedInUser, cookies);
+    
+    yield* pipe(
+      saveSessionToFileEffect(ctx),
+      Effect.provide(PlatformLayer)
+    );
     
     console.log(`\nSession saved! You can now run logged-in tests.`);
     console.log(`\nTo update the test file, set OWN_USERNAME to: ${loggedInUser}`);
+    
+    yield* ctx.close;
+  });
+
+  try {
+    await Effect.runPromise(program);
   } catch (err) {
     console.error("Error:", err instanceof Error ? err.message : err);
     process.exit(1);
-  } finally {
-    loader.close();
   }
 }
 

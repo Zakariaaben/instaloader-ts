@@ -1,5 +1,48 @@
 #!/usr/bin/env bun
-import { Instaloader } from "../src/index.ts";
+import { Effect, pipe, Exit, Cause } from "effect";
+import {
+  makeInstaloaderContext,
+  saveSessionToFileEffect,
+  PlatformLayer,
+  TwoFactorAuthRequiredError,
+} from "../src/index.ts";
+
+function readPassword(): Promise<string> {
+  return new Promise<string>((resolve) => {
+    process.stdout.write("Password: ");
+    let input = "";
+    process.stdin.setRawMode?.(true);
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (char: string) => {
+      if (char === "\n" || char === "\r" || char === "\u0004") {
+        process.stdin.setRawMode?.(false);
+        process.stdin.pause();
+        console.log("");
+        resolve(input);
+      } else if (char === "\u0003") {
+        process.exit(1);
+      } else if (char === "\u007F" || char === "\b") {
+        input = input.slice(0, -1);
+      } else {
+        input += char;
+      }
+    });
+  });
+}
+
+function read2FACode(): Promise<string> {
+  return new Promise<string>((resolve) => {
+    process.stdout.write("Enter 2FA code: ");
+    let input = "";
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    process.stdin.once("data", (data: string) => {
+      input = data.trim();
+      resolve(input);
+    });
+  });
+}
 
 async function main() {
   const args = process.argv.slice(2);
@@ -15,68 +58,60 @@ async function main() {
   let password = args[1];
 
   if (!password) {
-    process.stdout.write("Password: ");
-    password = await new Promise<string>((resolve) => {
-      let input = "";
-      process.stdin.setRawMode?.(true);
-      process.stdin.resume();
-      process.stdin.setEncoding("utf8");
-      process.stdin.on("data", (char: string) => {
-        if (char === "\n" || char === "\r" || char === "\u0004") {
-          process.stdin.setRawMode?.(false);
-          process.stdin.pause();
-          console.log("");
-          resolve(input);
-        } else if (char === "\u0003") {
-          process.exit(1);
-        } else if (char === "\u007F" || char === "\b") {
-          input = input.slice(0, -1);
-        } else {
-          input += char;
-        }
-      });
-    });
+    password = await readPassword();
   }
 
-  const loader = new Instaloader({ quiet: false });
-
-  try {
-    console.log(`Logging in as ${username}...`);
-    await loader.login(username, password);
-    console.log("Login successful!");
+  const program = Effect.gen(function* () {
+    const ctx = yield* makeInstaloaderContext({ quiet: false });
     
-    await loader.saveSessionToFile();
-    console.log("Session saved. You can now run logged-in tests.");
-  } catch (err: unknown) {
-    if (err instanceof Error && err.name === "TwoFactorAuthRequiredException") {
-      console.log("Two-factor authentication required.");
-      process.stdout.write("Enter 2FA code: ");
+    console.log(`Logging in as ${username}...`);
+    
+    const loginResult = yield* pipe(
+      ctx.login(username, password),
+      Effect.exit
+    );
+    
+    if (Exit.isFailure(loginResult)) {
+      const cause = loginResult.cause;
+      const defects = Cause.defects(cause);
+      const failures = Cause.failures(cause);
       
-      const code = await new Promise<string>((resolve) => {
-        let input = "";
-        process.stdin.resume();
-        process.stdin.setEncoding("utf8");
-        process.stdin.once("data", (data: string) => {
-          input = data.trim();
-          resolve(input);
-        });
-      });
-
-      try {
-        await loader.twoFactorLogin(code);
+      // Check if it's a 2FA error
+      let is2FA = false;
+      for (const failure of failures) {
+        if (failure instanceof TwoFactorAuthRequiredError) {
+          is2FA = true;
+          break;
+        }
+      }
+      
+      if (is2FA) {
+        console.log("Two-factor authentication required.");
+        const code = yield* Effect.promise(() => read2FACode());
+        yield* ctx.twoFactorLogin(code);
         console.log("2FA login successful!");
-        await loader.saveSessionToFile();
-        console.log("Session saved. You can now run logged-in tests.");
-      } catch (e) {
-        console.error("2FA login failed:", e instanceof Error ? e.message : e);
-        process.exit(1);
+      } else {
+        // Re-fail with the original cause
+        return yield* Effect.failCause(cause);
       }
     } else {
-      console.error("Login failed:", err instanceof Error ? err.message : err);
-      process.exit(1);
+      console.log("Login successful!");
     }
-  } finally {
-    loader.close();
+    
+    yield* pipe(
+      saveSessionToFileEffect(ctx),
+      Effect.provide(PlatformLayer)
+    );
+    console.log("Session saved. You can now run logged-in tests.");
+    
+    yield* ctx.close;
+  });
+
+  try {
+    await Effect.runPromise(program);
+  } catch (err: unknown) {
+    console.error("Login failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
   }
 }
 

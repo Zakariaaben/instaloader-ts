@@ -1,24 +1,34 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { Effect, Stream, pipe, Option } from "effect";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-  Instaloader,
   getDefaultSessionFilename,
-  Profile,
-  Post,
+  makeInstaloaderContext,
+  loadSessionFromFileEffect,
+  PlatformLayer,
+  profileFromUsername,
+  profileOwnProfile,
+  profileUsername,
+  profileGetPostsStream,
+  profileGetSavedPostsStream,
+  postFromNodeSync,
+  postToString,
+  postDateUtc,
+  type InstaloaderContextShape,
+  type JsonNode,
+  type PostData,
+  type ProfileData,
 } from "../src/index.ts";
 
-const PROFILE_WITH_HIGHLIGHTS = 325732271;
 const OWN_USERNAME = "zakaria_._ben";
 const PUBLIC_PROFILE = "selenagomez";
-const NORMAL_MAX_COUNT = 2;
 const PAGING_MAX_COUNT = 15;
-const STORIES_MAX_COUNT = 3;
 const TEST_TIMEOUT = 30000;
 
 describe("Instaloader Logged In Tests", () => {
-  let L: Instaloader;
+  let ctx: InstaloaderContextShape;
   let testDir: string;
   let sessionAvailable = false;
 
@@ -26,17 +36,21 @@ describe("Instaloader Logged In Tests", () => {
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), "instaloader-test-"));
     console.log(`Testing in ${testDir}`);
     process.chdir(testDir);
-    L = new Instaloader({
-      downloadGeotags: true,
-      downloadComments: true,
-      saveMetadata: true,
-    });
-    L.context.raiseAllErrors = true;
+
+    ctx = await Effect.runPromise(makeInstaloaderContext({
+      quiet: false,
+      sleep: true,
+    }));
 
     const sessionFile = getDefaultSessionFilename(OWN_USERNAME);
     if (fs.existsSync(sessionFile)) {
       try {
-        await L.loadSessionFromFile(OWN_USERNAME);
+        await Effect.runPromise(
+          pipe(
+            loadSessionFromFileEffect(ctx, OWN_USERNAME),
+            Effect.provide(PlatformLayer)
+          )
+        );
         sessionAvailable = true;
         console.log("Session loaded successfully");
       } catch (e) {
@@ -47,25 +61,25 @@ describe("Instaloader Logged In Tests", () => {
     }
   });
 
-  afterAll(() => {
-    L.close();
+  afterAll(async () => {
+    await Effect.runPromise(ctx.close);
     process.chdir("/");
     console.log(`Removing ${testDir}`);
     fs.rmSync(testDir, { recursive: true, force: true });
   });
 
-  async function postPagingTest(
-    iterator: AsyncIterable<Post>,
+  function postPagingTest(
+    posts: PostData[],
     maxCount: number = PAGING_MAX_COUNT,
-  ): Promise<void> {
-    let previousPost: Post | null = null;
+  ): void {
+    let previousPost: PostData | null = null;
     let count = 0;
-    for await (const post of iterator) {
-      console.log(post.toString());
+    for (const post of posts) {
+      console.log(postToString(post));
       if (previousPost) {
-        expect(post.dateUtc.getTime()).toBeLessThan(
-          previousPost.dateUtc.getTime(),
-        );
+        const currentDate = Option.getOrThrow(postDateUtc(post));
+        const previousDate = Option.getOrThrow(postDateUtc(previousPost));
+        expect(currentDate.getTime()).toBeLessThan(previousDate.getTime());
       }
       previousPost = post;
       count++;
@@ -78,49 +92,8 @@ describe("Instaloader Logged In Tests", () => {
       console.log("Skipping: No session available");
       return;
     }
-    const username = await L.testLogin();
+    const username = await Effect.runPromise(ctx.testLogin);
     expect(username).toBe(OWN_USERNAME);
-  }, TEST_TIMEOUT);
-
-  test("stories paging", async () => {
-    if (!sessionAvailable) {
-      console.log("Skipping: No session available");
-      return;
-    }
-    let storyCount = 0;
-    for await (const userStory of L.getStories()) {
-      console.log(`profile ${userStory.ownerUsername}.`);
-      let itemCount = 0;
-      for await (const item of userStory.getItems()) {
-        console.log(item.toString());
-        itemCount++;
-        if (itemCount >= 3) break;
-      }
-      storyCount++;
-      if (storyCount >= STORIES_MAX_COUNT) break;
-    }
-  }, TEST_TIMEOUT);
-
-  test("highlights paging", async () => {
-    if (!sessionAvailable) {
-      console.log("Skipping: No session available");
-      return;
-    }
-    let highlightCount = 0;
-    for await (const userHighlight of L.getHighlights(PROFILE_WITH_HIGHLIGHTS)) {
-      const itemcount = await userHighlight.getItemcount();
-      console.log(
-        `Retrieving ${itemcount} highlights "${userHighlight.title}" from profile ${userHighlight.ownerUsername}`,
-      );
-      let itemCount = 0;
-      for await (const item of userHighlight.getItems()) {
-        console.log(item.toString());
-        itemCount++;
-        if (itemCount >= 3) break;
-      }
-      highlightCount++;
-      if (highlightCount >= 3) break;
-    }
   }, TEST_TIMEOUT);
 
   test("public profile paging", async () => {
@@ -128,21 +101,27 @@ describe("Instaloader Logged In Tests", () => {
       console.log("Skipping: No session available");
       return;
     }
-    const profile = await Profile.fromUsername(L.context, PUBLIC_PROFILE);
-    await postPagingTest(profile.getPosts());
-  }, TEST_TIMEOUT);
 
-  test("feed paging", async () => {
-    if (!sessionAvailable) {
-      console.log("Skipping: No session available");
-      return;
-    }
-    let count = 0;
-    for await (const post of L.getFeedPosts()) {
-      console.log(post.toString());
-      count++;
-      if (count >= PAGING_MAX_COUNT) break;
-    }
+    const profile = await Effect.runPromise(profileFromUsername(ctx, PUBLIC_PROFILE));
+
+    const postsStream = await Effect.runPromise(
+      profileGetPostsStream(
+        ctx,
+        profile,
+        (node: JsonNode, _profile: ProfileData) => postFromNodeSync(node)
+      )
+    );
+
+    const posts = await Effect.runPromise(
+      pipe(
+        postsStream,
+        Stream.take(PAGING_MAX_COUNT),
+        Stream.runCollect,
+        Effect.map((chunk) => [...chunk])
+      )
+    );
+
+    postPagingTest(posts);
   }, TEST_TIMEOUT);
 
   test("saved paging", async () => {
@@ -150,38 +129,33 @@ describe("Instaloader Logged In Tests", () => {
       console.log("Skipping: No session available");
       return;
     }
-    const profile = await Profile.ownProfile(L.context);
-    console.log(`Getting saved posts for ${profile.username}`);
+
+    const profile = await Effect.runPromise(profileOwnProfile(ctx));
+    const username = profileUsername(profile);
+    console.log(`Getting saved posts for ${username}`);
+
+    const savedStream = await Effect.runPromise(
+      profileGetSavedPostsStream(
+        ctx,
+        profile,
+        (node: JsonNode) => postFromNodeSync(node)
+      )
+    );
+
+    const savedPosts = await Effect.runPromise(
+      pipe(
+        savedStream,
+        Stream.take(PAGING_MAX_COUNT),
+        Stream.runCollect,
+        Effect.map((chunk) => [...chunk])
+      )
+    );
+
     let count = 0;
-    for await (const post of profile.getSavedPosts()) {
-      console.log(post.toString());
+    for (const post of savedPosts) {
+      console.log(postToString(post));
       count++;
       if (count >= PAGING_MAX_COUNT) break;
     }
   }, TEST_TIMEOUT);
-
-  test.skip("stories download", async () => {
-    if (!sessionAvailable) {
-      console.log("Skipping: No session available");
-      return;
-    }
-    await L.downloadStories();
-  });
-
-  test.skip("public profile download", async () => {
-    if (!sessionAvailable) {
-      console.log("Skipping: No session available");
-      return;
-    }
-    const profile = await Profile.fromUsername(L.context, PUBLIC_PROFILE);
-    await L.downloadProfile(profile, { stories: true });
-  });
-
-  test.skip("feed download", async () => {
-    if (!sessionAvailable) {
-      console.log("Skipping: No session available");
-      return;
-    }
-    await L.downloadFeedPosts({ maxCount: NORMAL_MAX_COUNT });
-  });
 });

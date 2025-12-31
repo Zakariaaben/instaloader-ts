@@ -1,8 +1,10 @@
 import { describe, test, expect } from "bun:test";
+import { Effect, Ref } from "effect";
 import {
-  InstaloaderContext,
+  makeInstaloaderContext,
   defaultUserAgent,
   defaultIphoneHeaders,
+  type InstaloaderContextShape,
 } from "../src/index.ts";
 
 describe("InstaloaderContext", () => {
@@ -41,83 +43,119 @@ describe("InstaloaderContext", () => {
     });
   });
 
-  describe("InstaloaderContext", () => {
-    test("creates context with default options", () => {
-      const ctx = new InstaloaderContext();
-      expect(ctx.userAgent).toBe(defaultUserAgent());
-      expect(ctx.sleep).toBe(true);
-      expect(ctx.quiet).toBe(false);
-      expect(ctx.maxConnectionAttempts).toBe(3);
-      expect(ctx.iphoneSupport).toBe(true);
-      expect(ctx.isLoggedIn).toBe(false);
-      expect(ctx.username).toBeNull();
-      ctx.close();
+  describe("makeInstaloaderContext", () => {
+    const runWithContext = <A>(
+      fn: (ctx: InstaloaderContextShape) => Effect.Effect<A>
+    ): Promise<A> =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const ctx = yield* makeInstaloaderContext();
+          return yield* fn(ctx);
+        })
+      );
+
+    test("creates context with default options", async () => {
+      await runWithContext((ctx) =>
+        Effect.gen(function* () {
+          expect(ctx.options.userAgent).toBe(defaultUserAgent());
+          expect(ctx.options.sleep).toBe(true);
+          expect(ctx.options.quiet).toBe(false);
+          expect(ctx.options.maxConnectionAttempts).toBe(3);
+          expect(ctx.options.iphoneSupport).toBe(true);
+          const isLoggedIn = yield* ctx.isLoggedIn;
+          expect(isLoggedIn).toBe(false);
+          const username = yield* ctx.getUsername;
+          expect(username).toBeNull();
+        })
+      );
     });
 
-    test("creates context with custom options", () => {
-      const ctx = new InstaloaderContext({
-        userAgent: "CustomAgent/1.0",
-        sleep: false,
-        quiet: true,
-        maxConnectionAttempts: 5,
-        iphoneSupport: false,
-        requestTimeout: 60000,
-      });
-      expect(ctx.userAgent).toBe("CustomAgent/1.0");
-      expect(ctx.sleep).toBe(false);
-      expect(ctx.quiet).toBe(true);
-      expect(ctx.maxConnectionAttempts).toBe(5);
-      expect(ctx.iphoneSupport).toBe(false);
-      expect(ctx.requestTimeout).toBe(60000);
-      ctx.close();
+    test("creates context with custom options", async () => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const ctx = yield* makeInstaloaderContext({
+            userAgent: "CustomAgent/1.0",
+            sleep: false,
+            quiet: true,
+            maxConnectionAttempts: 5,
+            iphoneSupport: false,
+            requestTimeout: 60000,
+          });
+          expect(ctx.options.userAgent).toBe("CustomAgent/1.0");
+          expect(ctx.options.sleep).toBe(false);
+          expect(ctx.options.quiet).toBe(true);
+          expect(ctx.options.maxConnectionAttempts).toBe(5);
+          expect(ctx.options.iphoneSupport).toBe(false);
+          expect(ctx.options.requestTimeout).toBe(60000);
+        })
+      );
     });
 
-    test("isLoggedIn returns false initially", () => {
-      const ctx = new InstaloaderContext();
-      expect(ctx.isLoggedIn).toBe(false);
-      ctx.close();
+    test("isLoggedIn returns false initially", async () => {
+      await runWithContext((ctx) =>
+        Effect.gen(function* () {
+          const isLoggedIn = yield* ctx.isLoggedIn;
+          expect(isLoggedIn).toBe(false);
+        })
+      );
     });
 
-    test("saveSession returns cookies", () => {
-      const ctx = new InstaloaderContext();
-      const session = ctx.saveSession();
-      expect(typeof session).toBe("object");
-      expect(session).toHaveProperty("sessionid");
-      ctx.close();
+    test("saveSession returns cookies", async () => {
+      await runWithContext((ctx) =>
+        Effect.gen(function* () {
+          const session = yield* ctx.saveSession;
+          expect(typeof session).toBe("object");
+          expect(session).toHaveProperty("sessionid");
+        })
+      );
     });
 
-    test("loadSession restores session", () => {
-      const ctx = new InstaloaderContext();
-      const sessionData = {
-        sessionid: "test123",
-        csrftoken: "csrf456",
-        mid: "mid789",
-      };
-      ctx.loadSession("testuser", sessionData);
-      expect(ctx.username).toBe("testuser");
-      expect(ctx.isLoggedIn).toBe(true);
-      ctx.close();
+    test("loadSession restores session", async () => {
+      await runWithContext((ctx) =>
+        Effect.gen(function* () {
+          const sessionData = {
+            sessionid: "test123",
+            csrftoken: "csrf456",
+            mid: "mid789",
+          };
+          yield* ctx.loadSession("testuser", sessionData);
+          const username = yield* ctx.getUsername;
+          expect(username).toBe("testuser");
+          const isLoggedIn = yield* ctx.isLoggedIn;
+          expect(isLoggedIn).toBe(true);
+        })
+      );
     });
 
-    test("hasStoredErrors returns false initially", () => {
-      const ctx = new InstaloaderContext();
-      expect(ctx.hasStoredErrors).toBe(false);
-      ctx.close();
+    test("hasStoredErrors returns false initially", async () => {
+      await runWithContext((ctx) =>
+        Effect.gen(function* () {
+          const hasErrors = yield* ctx.hasStoredErrors;
+          expect(hasErrors).toBe(false);
+        })
+      );
     });
 
-    test("error logs messages", () => {
-      const ctx = new InstaloaderContext();
-      ctx.error("test error", true);
-      expect(ctx.hasStoredErrors).toBe(true);
-      expect(ctx.errorLog).toContain("test error");
-      ctx.close();
+    test("error logs messages with repeatAtEnd=true", async () => {
+      await runWithContext((ctx) =>
+        Effect.gen(function* () {
+          yield* ctx.error("test error", true);
+          const hasErrors = yield* ctx.hasStoredErrors;
+          expect(hasErrors).toBe(true);
+          const state = yield* Ref.get(ctx.stateRef);
+          expect(state.errorLog).toContain("test error");
+        })
+      );
     });
 
-    test("error with repeatAtEnd=false does not store", () => {
-      const ctx = new InstaloaderContext();
-      ctx.error("transient error", false);
-      expect(ctx.errorLog).not.toContain("transient error");
-      ctx.close();
+    test("error with repeatAtEnd=false does not store", async () => {
+      await runWithContext((ctx) =>
+        Effect.gen(function* () {
+          yield* ctx.error("transient error", false);
+          const state = yield* Ref.get(ctx.stateRef);
+          expect(state.errorLog).not.toContain("transient error");
+        })
+      );
     });
   });
 });

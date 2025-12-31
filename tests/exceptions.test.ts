@@ -1,114 +1,112 @@
 import { describe, test, expect } from "bun:test";
-import {
-  InstaloaderException,
-  LoginException,
-  LoginRequiredException,
-  BadCredentialsException,
-  TwoFactorAuthRequiredException,
-  ConnectionException,
-  InvalidArgumentException,
-  BadResponseException,
-  QueryReturnedBadRequestException,
-  QueryReturnedNotFoundException,
-  QueryReturnedForbiddenException,
-  ProfileNotExistsException,
-  PostChangedException,
-  TooManyRequestsException,
-  PrivateProfileNotFollowedException,
-  AbortDownloadException,
-  IPhoneSupportDisabledException,
-} from "../src/index.ts";
+import { EffectExceptions } from "../src/index.ts";
 
-describe("Exceptions", () => {
-  test("InstaloaderException is base class", () => {
-    const err = new InstaloaderException("test");
-    expect(err).toBeInstanceOf(Error);
+const {
+  InstaloaderError,
+  LoginError,
+  LoginRequiredError,
+  BadCredentialsError,
+  TwoFactorAuthRequiredError,
+  ConnectionError,
+  InvalidArgumentError,
+  BadResponseError,
+  QueryReturnedBadRequestError,
+  QueryReturnedNotFoundError,
+  QueryReturnedForbiddenError,
+  ProfileNotExistsError,
+  PostChangedError,
+  TooManyRequestsError,
+  PrivateProfileNotFollowedError,
+  AbortDownloadError,
+  IPhoneSupportDisabledError,
+} = EffectExceptions;
+
+describe("Effect Errors", () => {
+  test("InstaloaderError has _tag", () => {
+    const err = new InstaloaderError({ message: "test" });
+    expect(err._tag).toBe("InstaloaderError");
     expect(err.message).toBe("test");
-    expect(err.name).toBe("InstaloaderException");
   });
 
-  test("LoginException extends InstaloaderException", () => {
-    const err = new LoginException("login failed");
-    expect(err).toBeInstanceOf(InstaloaderException);
-    expect(err).toBeInstanceOf(Error);
+  test("LoginError has _tag", () => {
+    const err = new LoginError({ message: "login failed" });
+    expect(err._tag).toBe("LoginError");
     expect(err.message).toBe("login failed");
   });
 
-  test("LoginRequiredException extends InstaloaderException", () => {
-    const err = new LoginRequiredException("login required");
-    expect(err).toBeInstanceOf(InstaloaderException);
-    expect(err.name).toBe("LoginRequiredException");
+  test("LoginRequiredError has _tag", () => {
+    const err = new LoginRequiredError({ message: "login required" });
+    expect(err._tag).toBe("LoginRequiredError");
   });
 
-  test("BadCredentialsException extends InstaloaderException", () => {
-    const err = new BadCredentialsException("wrong password");
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("BadCredentialsError has _tag", () => {
+    const err = new BadCredentialsError({ message: "wrong password" });
+    expect(err._tag).toBe("BadCredentialsError");
   });
 
-  test("TwoFactorAuthRequiredException contains identifier", () => {
-    const err = new TwoFactorAuthRequiredException("2fa required", "abc123");
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("TwoFactorAuthRequiredError contains identifier", () => {
+    const err = new TwoFactorAuthRequiredError({ message: "2fa required", twoFactorIdentifier: "abc123" });
+    expect(err._tag).toBe("TwoFactorAuthRequiredError");
     expect(err.twoFactorIdentifier).toBe("abc123");
   });
 
-  test("ConnectionException extends InstaloaderException", () => {
-    const err = new ConnectionException("network error");
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("ConnectionError has _tag", () => {
+    const err = new ConnectionError({ message: "network error" });
+    expect(err._tag).toBe("ConnectionError");
   });
 
-  test("InvalidArgumentException extends InstaloaderException", () => {
-    const err = new InvalidArgumentException("invalid arg");
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("InvalidArgumentError has _tag", () => {
+    const err = new InvalidArgumentError({ message: "invalid arg" });
+    expect(err._tag).toBe("InvalidArgumentError");
   });
 
-  test("BadResponseException extends InstaloaderException", () => {
-    const err = new BadResponseException("bad response");
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("BadResponseError has _tag", () => {
+    const err = new BadResponseError({ message: "bad response" });
+    expect(err._tag).toBe("BadResponseError");
   });
 
-  test("QueryReturnedBadRequestException extends InstaloaderException", () => {
-    const err = new QueryReturnedBadRequestException("400 error");
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("QueryReturnedBadRequestError has _tag", () => {
+    const err = new QueryReturnedBadRequestError({ message: "400 error" });
+    expect(err._tag).toBe("QueryReturnedBadRequestError");
   });
 
-  test("QueryReturnedNotFoundException extends ConnectionException", () => {
-    const err = new QueryReturnedNotFoundException("404 error");
-    expect(err).toBeInstanceOf(ConnectionException);
+  test("QueryReturnedNotFoundError has _tag", () => {
+    const err = new QueryReturnedNotFoundError({ message: "404 error" });
+    expect(err._tag).toBe("QueryReturnedNotFoundError");
   });
 
-  test("QueryReturnedForbiddenException extends InstaloaderException", () => {
-    const err = new QueryReturnedForbiddenException("403 error");
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("QueryReturnedForbiddenError has _tag", () => {
+    const err = new QueryReturnedForbiddenError({ message: "403 error" });
+    expect(err._tag).toBe("QueryReturnedForbiddenError");
   });
 
-  test("ProfileNotExistsException extends InstaloaderException", () => {
-    const err = new ProfileNotExistsException("profile not found");
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("ProfileNotExistsError has _tag", () => {
+    const err = new ProfileNotExistsError({ message: "profile not found" });
+    expect(err._tag).toBe("ProfileNotExistsError");
   });
 
-  test("PostChangedException extends InstaloaderException", () => {
-    const err = new PostChangedException();
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("PostChangedError has _tag", () => {
+    const err = new PostChangedError({ message: "post changed" });
+    expect(err._tag).toBe("PostChangedError");
   });
 
-  test("TooManyRequestsException extends ConnectionException", () => {
-    const err = new TooManyRequestsException("429 error");
-    expect(err).toBeInstanceOf(ConnectionException);
+  test("TooManyRequestsError has _tag", () => {
+    const err = new TooManyRequestsError({ message: "429 error" });
+    expect(err._tag).toBe("TooManyRequestsError");
   });
 
-  test("PrivateProfileNotFollowedException extends InstaloaderException", () => {
-    const err = new PrivateProfileNotFollowedException("not following");
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("PrivateProfileNotFollowedError has _tag", () => {
+    const err = new PrivateProfileNotFollowedError({ message: "not following" });
+    expect(err._tag).toBe("PrivateProfileNotFollowedError");
   });
 
-  test("AbortDownloadException does NOT extend InstaloaderException", () => {
-    const err = new AbortDownloadException("download aborted");
-    expect(err).toBeInstanceOf(Error);
-    expect(err).not.toBeInstanceOf(InstaloaderException);
+  test("AbortDownloadError has _tag", () => {
+    const err = new AbortDownloadError({ message: "download aborted" });
+    expect(err._tag).toBe("AbortDownloadError");
   });
 
-  test("IPhoneSupportDisabledException extends InstaloaderException", () => {
-    const err = new IPhoneSupportDisabledException("iphone disabled");
-    expect(err).toBeInstanceOf(InstaloaderException);
+  test("IPhoneSupportDisabledError has _tag", () => {
+    const err = new IPhoneSupportDisabledError({ message: "iphone disabled" });
+    expect(err._tag).toBe("IPhoneSupportDisabledError");
   });
 });

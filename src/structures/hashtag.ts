@@ -1,263 +1,304 @@
-import { InstaloaderContext } from "../core/context.ts";
+import { Effect, Option, Stream } from "effect";
+import { type InstaloaderContextShape } from "../core/context.ts";
+import { AbortDownloadError, type InstaloaderErrors } from "../exceptions/index.ts";
 import { type JsonNode } from "./common.ts";
-import { Post } from "./post.ts";
+import { fromIphoneStruct as postFromIphoneStruct, fromNode as postFromNode, type PostData } from "./post.ts";
 
-export class Hashtag {
-  private _context: InstaloaderContext;
-  private _node: JsonNode;
-  private _hasFullMetadata: boolean = false;
+export type HashtagError = InstaloaderErrors | AbortDownloadError;
 
-  constructor(context: InstaloaderContext, node: JsonNode) {
-    if (!("name" in node)) {
-      throw new Error("Hashtag node must have 'name' property");
+export interface HashtagData {
+  readonly node: JsonNode;
+  readonly hasFullMetadata: boolean;
+}
+
+const getMetadata = <T>(node: JsonNode, ...keys: string[]): Option.Option<T> => {
+  try {
+    let d: unknown = node;
+    for (const key of keys) {
+      if (d === null || d === undefined || typeof d !== "object") {
+        return Option.none();
+      }
+      d = (d as JsonNode)[key];
     }
-    this._context = context;
-    this._node = node;
+    if (d === undefined) return Option.none();
+    return Option.some(d as T);
+  } catch {
+    return Option.none();
   }
+};
 
-  static async fromName(
-    context: InstaloaderContext,
-    name: string,
-  ): Promise<Hashtag> {
-    const hashtag = new Hashtag(context, { name: name.toLowerCase() });
-    await hashtag._obtainMetadata();
-    return hashtag;
-  }
-
-  get name(): string {
-    return (this._node["name"] as string).toLowerCase();
-  }
-
-  private async _query(params: Record<string, unknown>): Promise<JsonNode> {
-    const jsonResponse = await this._context.getIphoneJson(
+export const fromNameEffect = (
+  context: InstaloaderContextShape,
+  name: string
+): Effect.Effect<HashtagData, HashtagError> =>
+  Effect.gen(function* () {
+    const normalizedName = name.toLowerCase();
+    const jsonResponse = yield* context.getIphoneJson(
       "api/v1/tags/web_info/",
-      { ...params, tag_name: this.name },
+      { tag_name: normalizedName, __a: "1", __d: "dis" }
+    );
+    let node: JsonNode;
+    if ("graphql" in jsonResponse) {
+      node = (jsonResponse["graphql"] as JsonNode)["hashtag"] as JsonNode;
+    } else {
+      node = jsonResponse["data"] as JsonNode;
+    }
+    return { node, hasFullMetadata: true };
+  });
+
+import { InvalidArgumentError } from "../exceptions/index.ts";
+
+export const hashtagFromNode = (node: JsonNode): Effect.Effect<HashtagData, InvalidArgumentError> =>
+  Effect.gen(function* () {
+    if (!("name" in node)) {
+      return yield* Effect.fail(
+        new InvalidArgumentError({ message: "Hashtag node must have 'name' property" })
+      );
+    }
+    return { node, hasFullMetadata: false };
+  });
+
+export const hashtagName = (hashtag: HashtagData): string =>
+  (hashtag.node["name"] as string).toLowerCase();
+
+export const hashtagToString = (hashtag: HashtagData): string =>
+  `<Hashtag #${hashtagName(hashtag)}>`;
+
+export const hashtagEquals = (h1: HashtagData, h2: HashtagData): boolean =>
+  hashtagName(h1) === hashtagName(h2);
+
+export const hashtagToDict = (hashtag: HashtagData): JsonNode => {
+  const jsonNode = { ...hashtag.node };
+  delete jsonNode["edge_hashtag_to_top_posts"];
+  delete jsonNode["top"];
+  delete jsonNode["edge_hashtag_to_media"];
+  delete jsonNode["recent"];
+  return jsonNode;
+};
+
+const queryHashtag = (
+  context: InstaloaderContextShape,
+  name: string,
+  params: Record<string, unknown>
+): Effect.Effect<JsonNode, HashtagError> =>
+  Effect.gen(function* () {
+    const jsonResponse = yield* context.getIphoneJson(
+      "api/v1/tags/web_info/",
+      { ...params, tag_name: name } as Record<string, string>
     );
     if ("graphql" in jsonResponse) {
       return (jsonResponse["graphql"] as JsonNode)["hashtag"] as JsonNode;
     }
     return jsonResponse["data"] as JsonNode;
-  }
+  });
 
-  private async _obtainMetadata(): Promise<void> {
-    if (!this._hasFullMetadata) {
-      this._node = await this._query({ __a: 1, __d: "dis" });
-      this._hasFullMetadata = true;
+export const hashtagObtainMetadata = (
+  context: InstaloaderContextShape,
+  hashtag: HashtagData
+): Effect.Effect<HashtagData, HashtagError> =>
+  Effect.gen(function* () {
+    if (hashtag.hasFullMetadata) {
+      return hashtag;
     }
-  }
+    const node = yield* queryHashtag(context, hashtagName(hashtag), { __a: "1", __d: "dis" });
+    return { node, hasFullMetadata: true };
+  });
 
-  _asdict(): JsonNode {
-    const jsonNode = { ...this._node };
-    delete jsonNode["edge_hashtag_to_top_posts"];
-    delete jsonNode["top"];
-    delete jsonNode["edge_hashtag_to_media"];
-    delete jsonNode["recent"];
-    return jsonNode;
-  }
+export const hashtagGetHashtagid = (
+  context: InstaloaderContextShape,
+  hashtag: HashtagData
+): Effect.Effect<number, HashtagError> =>
+  Effect.gen(function* () {
+    const result = getMetadata<string>(hashtag.node, "id");
+    if (Option.isSome(result)) {
+      return Number(result.value);
+    }
+    const updated = yield* hashtagObtainMetadata(context, hashtag);
+    return Number(getMetadata<string>(updated.node, "id").pipe(Option.getOrThrow));
+  });
 
-  toString(): string {
-    return `<Hashtag #${this.name}>`;
-  }
+export const hashtagGetProfilePicUrl = (
+  context: InstaloaderContextShape,
+  hashtag: HashtagData
+): Effect.Effect<string, HashtagError> =>
+  Effect.gen(function* () {
+    const result = getMetadata<string>(hashtag.node, "profile_pic_url");
+    if (Option.isSome(result)) {
+      return result.value;
+    }
+    const updated = yield* hashtagObtainMetadata(context, hashtag);
+    return getMetadata<string>(updated.node, "profile_pic_url").pipe(Option.getOrThrow);
+  });
 
-  equals(other: Hashtag): boolean {
-    return this.name === other.name;
-  }
+export const hashtagGetDescription = (
+  context: InstaloaderContextShape,
+  hashtag: HashtagData
+): Effect.Effect<string | null, HashtagError> =>
+  Effect.gen(function* () {
+    const result = getMetadata<string | null>(hashtag.node, "description");
+    if (Option.isSome(result)) {
+      return result.value;
+    }
+    const updated = yield* hashtagObtainMetadata(context, hashtag);
+    return getMetadata<string | null>(updated.node, "description").pipe(Option.getOrNull);
+  });
 
-  private async _metadata<T>(...keys: string[]): Promise<T> {
-    let d: unknown = this._node;
-    try {
-      for (const key of keys) {
-        d = (d as JsonNode)[key];
-        if (d === undefined) {
-          throw new Error("Key not found");
+export const hashtagGetAllowFollowing = (
+  context: InstaloaderContextShape,
+  hashtag: HashtagData
+): Effect.Effect<boolean, HashtagError> =>
+  Effect.gen(function* () {
+    const result = getMetadata<boolean>(hashtag.node, "allow_following");
+    if (Option.isSome(result)) {
+      return Boolean(result.value);
+    }
+    const updated = yield* hashtagObtainMetadata(context, hashtag);
+    return Boolean(getMetadata<boolean>(updated.node, "allow_following").pipe(Option.getOrElse(() => false)));
+  });
+
+export const hashtagGetIsFollowing = (
+  context: InstaloaderContextShape,
+  hashtag: HashtagData
+): Effect.Effect<boolean, HashtagError> =>
+  Effect.gen(function* () {
+    const isFollowingResult = getMetadata<boolean>(hashtag.node, "is_following");
+    if (Option.isSome(isFollowingResult)) {
+      return isFollowingResult.value;
+    }
+    const followingResult = getMetadata<boolean>(hashtag.node, "following");
+    if (Option.isSome(followingResult)) {
+      return Boolean(followingResult.value);
+    }
+    const updated = yield* hashtagObtainMetadata(context, hashtag);
+    const updatedIsFollowing = getMetadata<boolean>(updated.node, "is_following");
+    if (Option.isSome(updatedIsFollowing)) {
+      return updatedIsFollowing.value;
+    }
+    return Boolean(getMetadata<boolean>(updated.node, "following").pipe(Option.getOrElse(() => false)));
+  });
+
+export const hashtagGetMediacount = (
+  context: InstaloaderContextShape,
+  hashtag: HashtagData
+): Effect.Effect<number, HashtagError> =>
+  Effect.gen(function* () {
+    const countResult = getMetadata<number>(hashtag.node, "edge_hashtag_to_media", "count");
+    if (Option.isSome(countResult)) {
+      return countResult.value;
+    }
+    const mediaCountResult = getMetadata<number>(hashtag.node, "media_count");
+    if (Option.isSome(mediaCountResult)) {
+      return mediaCountResult.value;
+    }
+    const updated = yield* hashtagObtainMetadata(context, hashtag);
+    const updatedCountResult = getMetadata<number>(updated.node, "edge_hashtag_to_media", "count");
+    if (Option.isSome(updatedCountResult)) {
+      return updatedCountResult.value;
+    }
+    return getMetadata<number>(updated.node, "media_count").pipe(Option.getOrElse(() => 0));
+  });
+
+export const hashtagGetTopPostsStream = (
+  context: InstaloaderContextShape,
+  hashtag: HashtagData
+): Effect.Effect<Stream.Stream<PostData, HashtagError | InvalidArgumentError>, HashtagError> =>
+  Effect.gen(function* () {
+    const updated = yield* hashtagObtainMetadata(context, hashtag);
+
+    const edgesResult = getMetadata<JsonNode[]>(updated.node, "edge_hashtag_to_top_posts", "edges");
+    if (Option.isSome(edgesResult)) {
+      return Stream.mapEffect(
+        Stream.fromIterable(edgesResult.value),
+        (edge) => postFromNode(edge["node"] as JsonNode)
+      );
+    }
+
+    const topData = getMetadata<JsonNode>(updated.node, "top");
+    if (Option.isSome(topData) && "sections" in topData.value) {
+      const posts: PostData[] = [];
+      const sections = topData.value["sections"] as JsonNode[];
+      for (const section of sections) {
+        const layoutContent = section["layout_content"] as JsonNode;
+        const medias = layoutContent["medias"] as JsonNode[];
+        for (const mediaWrapper of medias) {
+          const media = mediaWrapper["media"] as JsonNode;
+          posts.push(postFromIphoneStruct(media));
         }
       }
-      return d as T;
-    } catch {
-      await this._obtainMetadata();
-      d = this._node;
-      for (const key of keys) {
-        d = (d as JsonNode)[key];
-      }
-      return d as T;
+      return Stream.fromIterable(posts);
     }
-  }
 
-  async getHashtagid(): Promise<number> {
-    return Number(await this._metadata<string>("id"));
-  }
+    return Stream.empty;
+  });
 
-  async getProfilePicUrl(): Promise<string> {
-    return await this._metadata<string>("profile_pic_url");
-  }
+export const hashtagGetPostsStream = (
+  context: InstaloaderContextShape,
+  hashtag: HashtagData
+): Effect.Effect<Stream.Stream<PostData, HashtagError | InvalidArgumentError>, HashtagError> =>
+  Effect.gen(function* () {
+    const updated = yield* hashtagObtainMetadata(context, hashtag);
+    const name = hashtagName(updated);
 
-  async getDescription(): Promise<string | null> {
-    return await this._metadata<string | null>("description");
-  }
+    const edgesResult = getMetadata<JsonNode[]>(updated.node, "edge_hashtag_to_media", "edges");
+    if (Option.isSome(edgesResult)) {
+      const pageInfoResult = getMetadata<JsonNode>(updated.node, "edge_hashtag_to_media", "page_info");
+      const initialEdges = edgesResult.value;
+      const initialPageInfo: JsonNode = pageInfoResult.pipe(
+        Option.getOrElse(() => ({ has_next_page: false } as JsonNode))
+      );
 
-  async getAllowFollowing(): Promise<boolean> {
-    return Boolean(await this._metadata<boolean>("allow_following"));
-  }
+      return Stream.flatMap(
+        Stream.unfoldEffect(
+          { edges: initialEdges, pageInfo: initialPageInfo, index: 0, done: false },
+          (state) => {
+            if (state.done && state.index >= state.edges.length) {
+              return Effect.succeed(Option.none());
+            }
 
-  async getIsFollowing(): Promise<boolean> {
-    try {
-      return await this._metadata<boolean>("is_following");
-    } catch {
-      return Boolean(await this._metadata<boolean>("following"));
-    }
-  }
+            if (state.index < state.edges.length) {
+              const edge = state.edges[state.index]!;
+              return Effect.succeed(Option.some([edge["node"] as JsonNode, { ...state, index: state.index + 1 }]));
+            }
 
-  async *getTopPosts(): AsyncGenerator<Post> {
-    try {
-      const edges = await this._metadata<JsonNode[]>("edge_hashtag_to_top_posts", "edges");
-      for (const edge of edges) {
-        const node = edge["node"] as JsonNode;
-        yield new Post(this._context, node);
-      }
-    } catch {
-      const topData = await this._metadata<JsonNode>("top");
-      if (topData && "sections" in topData) {
-        const sections = topData["sections"] as JsonNode[];
-        for (const section of sections) {
-          const layoutContent = section["layout_content"] as JsonNode;
-          const medias = layoutContent["medias"] as JsonNode[];
-          for (const mediaWrapper of medias) {
-            const media = mediaWrapper["media"] as JsonNode;
-            yield Post.fromIphoneStruct(this._context, media);
+            if (!state.pageInfo["has_next_page"]) {
+              return Effect.succeed(Option.none());
+            }
+
+            return Effect.gen(function* () {
+              const data = yield* queryHashtag(context, name, {
+                __a: "1",
+                max_id: state.pageInfo["end_cursor"] as string,
+              });
+              const conn = data["edge_hashtag_to_media"] as JsonNode;
+              const newEdges = conn["edges"] as JsonNode[];
+              const newPageInfo = conn["page_info"] as JsonNode;
+
+              if (newEdges.length === 0) {
+                return Option.none();
+              }
+
+              return Option.some([newEdges[0]!["node"] as JsonNode, { edges: newEdges, pageInfo: newPageInfo, index: 1, done: false }]);
+            });
           }
-        }
-      }
-    }
-  }
-
-  async getMediacount(): Promise<number> {
-    try {
-      return await this._metadata<number>("edge_hashtag_to_media", "count");
-    } catch {
-      return await this._metadata<number>("media_count");
-    }
-  }
-
-  async *getPosts(): AsyncGenerator<Post> {
-    try {
-      let edges = await this._metadata<JsonNode[]>("edge_hashtag_to_media", "edges");
-      let pageInfo = await this._metadata<JsonNode>("edge_hashtag_to_media", "page_info");
-
-      for (const edge of edges) {
-        const node = edge["node"] as JsonNode;
-        yield new Post(this._context, node);
-      }
-
-      while (pageInfo["has_next_page"]) {
-        const data = await this._query({
-          __a: 1,
-          max_id: pageInfo["end_cursor"],
-        });
-        const conn = data["edge_hashtag_to_media"] as JsonNode;
-        edges = conn["edges"] as JsonNode[];
-        pageInfo = conn["page_info"] as JsonNode;
-
-        for (const edge of edges) {
-          const node = edge["node"] as JsonNode;
-          yield new Post(this._context, node);
-        }
-      }
-    } catch {
-      const recentData = await this._metadata<JsonNode>("recent");
-      if (recentData && "sections" in recentData) {
-        const sections = recentData["sections"] as JsonNode[];
-        for (const section of sections) {
-          const layoutContent = section["layout_content"] as JsonNode;
-          const medias = layoutContent["medias"] as JsonNode[];
-          for (const mediaWrapper of medias) {
-            const media = mediaWrapper["media"] as JsonNode;
-            yield Post.fromIphoneStruct(this._context, media);
-          }
-        }
-      }
-    }
-  }
-
-  async *getAllPosts(): AsyncGenerator<Post> {
-    const topPosts: Post[] = [];
-    let count = 0;
-    for await (const post of this.getTopPosts()) {
-      topPosts.push(post);
-      count++;
-      if (count >= 9) break;
-    }
-    const sortedTopPosts = topPosts.sort(
-      (a, b) => b.dateUtc.getTime() - a.dateUtc.getTime(),
-    );
-    let topIdx = 0;
-    const seenShortcodes = new Set<string>();
-
-    const otherPosts = this.getPosts();
-    let nextTop: Post | null = sortedTopPosts[topIdx] ?? null;
-    topIdx++;
-    let nextOther: Post | null = null;
-
-    const otherResult = await otherPosts.next();
-    if (!otherResult.done) {
-      nextOther = otherResult.value;
+        ),
+        (node) => Stream.fromEffect(postFromNode(node))
+      );
     }
 
-    while (nextTop !== null || nextOther !== null) {
-      if (nextOther === null) {
-        if (nextTop !== null && !seenShortcodes.has(nextTop.shortcode)) {
-          seenShortcodes.add(nextTop.shortcode);
-          yield nextTop;
+    const recentData = getMetadata<JsonNode>(updated.node, "recent");
+    if (Option.isSome(recentData) && "sections" in recentData.value) {
+      const posts: PostData[] = [];
+      const sections = recentData.value["sections"] as JsonNode[];
+      for (const section of sections) {
+        const layoutContent = section["layout_content"] as JsonNode;
+        const medias = layoutContent["medias"] as JsonNode[];
+        for (const mediaWrapper of medias) {
+          const media = mediaWrapper["media"] as JsonNode;
+          posts.push(postFromIphoneStruct(media));
         }
-        while (topIdx < sortedTopPosts.length) {
-          const p = sortedTopPosts[topIdx];
-          topIdx++;
-          if (p && !seenShortcodes.has(p.shortcode)) {
-            seenShortcodes.add(p.shortcode);
-            yield p;
-          }
-        }
-        break;
       }
-
-      if (nextTop === null) {
-        if (!seenShortcodes.has(nextOther.shortcode)) {
-          seenShortcodes.add(nextOther.shortcode);
-          yield nextOther;
-        }
-        for await (const p of otherPosts) {
-          if (!seenShortcodes.has(p.shortcode)) {
-            seenShortcodes.add(p.shortcode);
-            yield p;
-          }
-        }
-        break;
-      }
-
-      if (nextTop.shortcode === nextOther.shortcode) {
-        seenShortcodes.add(nextTop.shortcode);
-        yield nextTop;
-        nextTop = sortedTopPosts[topIdx] ?? null;
-        topIdx++;
-        const result = await otherPosts.next();
-        nextOther = result.done ? null : result.value;
-        continue;
-      }
-
-      if (nextTop.dateUtc.getTime() > nextOther.dateUtc.getTime()) {
-        if (!seenShortcodes.has(nextTop.shortcode)) {
-          seenShortcodes.add(nextTop.shortcode);
-          yield nextTop;
-        }
-        nextTop = sortedTopPosts[topIdx] ?? null;
-        topIdx++;
-      } else {
-        if (!seenShortcodes.has(nextOther.shortcode)) {
-          seenShortcodes.add(nextOther.shortcode);
-          yield nextOther;
-        }
-        const result = await otherPosts.next();
-        nextOther = result.done ? null : result.value;
-      }
+      return Stream.fromIterable(posts);
     }
-  }
-}
+
+    return Stream.empty;
+  });

@@ -1,24 +1,29 @@
+import { Effect, Ref, Duration, pipe } from "effect";
 import {
-  AbortDownloadException,
-  BadCredentialsException,
-  BadResponseException,
-  ConnectionException,
-  InstaloaderException,
-  InvalidArgumentException,
-  LoginException,
-  LoginRequiredException,
-  QueryReturnedBadRequestException,
-  QueryReturnedForbiddenException,
-  QueryReturnedNotFoundException,
-  TooManyRequestsException,
-  TwoFactorAuthRequiredException,
+  AbortDownloadError,
+  BadCredentialsError,
+  BadResponseError,
+  ConnectionError,
+  InstaloaderError,
+  InvalidArgumentError,
+  LoginError,
+  LoginRequiredError,
+  QueryReturnedBadRequestError,
+  QueryReturnedForbiddenError,
+  QueryReturnedNotFoundError,
+  TooManyRequestsError,
+  TwoFactorAuthRequiredError,
+  type InstaloaderErrors,
 } from "../exceptions/index.ts";
 
-export function defaultUserAgent(): string {
-  return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
-}
+export type ContextError =
+  | InstaloaderErrors
+  | AbortDownloadError;
 
-export function defaultIphoneHeaders(): Record<string, string> {
+export const defaultUserAgent = (): string =>
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+
+export const defaultIphoneHeaders = (): Record<string, string> => {
   const timezoneOffset = new Date().getTimezoneOffset() * -60;
   return {
     "User-Agent":
@@ -48,7 +53,7 @@ export function defaultIphoneHeaders(): Record<string, string> {
     "x-tigon-is-retry": "False",
     "x-whatsapp": "0",
   };
-}
+};
 
 export interface CookieJar {
   [key: string]: string;
@@ -60,907 +65,1125 @@ export interface InstaloaderContextOptions {
   userAgent?: string;
   maxConnectionAttempts?: number;
   requestTimeout?: number;
-  rateController?: (ctx: InstaloaderContext) => RateController;
   fatalStatusCodes?: number[];
   iphoneSupport?: boolean;
 }
 
-export class InstaloaderContext {
-  userAgent: string;
-  requestTimeout: number;
-  username: string | null = null;
-  userId: string | null = null;
-  sleep: boolean;
-  quiet: boolean;
-  maxConnectionAttempts: number;
-  iphoneSupport: boolean;
+// Internal mutable state for the context
+interface ContextState {
+  cookies: CookieJar;
+  csrfToken: string;
+  username: string | null;
+  userId: string | null;
+  errorLog: string[];
   iphoneHeaders: Record<string, string>;
-  errorLog: string[] = [];
-  raiseAllErrors = false;
-  fatalStatusCodes: number[];
-  profileIdCache: Map<number, unknown> = new Map();
-
-  private cookies: CookieJar = {};
-  private csrfToken = "";
-  private rateController: RateController;
-  private twoFactorAuthPending: {
+  twoFactorAuthPending: {
     cookies: CookieJar;
     csrfToken: string;
     user: string;
     twoFactorId: string;
-  } | null = null;
+  } | null;
+  queryTimestamps: Map<string, number[]>;
+  earliestNextRequestTime: number;
+  iphoneEarliestNextRequestTime: number;
+  profileIdCache: Map<number, unknown>;
+}
 
-  constructor(options: InstaloaderContextOptions = {}) {
-    this.userAgent = options.userAgent ?? defaultUserAgent();
-    this.requestTimeout = options.requestTimeout ?? 300000;
-    this.sleep = options.sleep ?? true;
-    this.quiet = options.quiet ?? false;
-    this.maxConnectionAttempts = options.maxConnectionAttempts ?? 3;
-    this.iphoneSupport = options.iphoneSupport ?? true;
-    this.iphoneHeaders = defaultIphoneHeaders();
-    this.fatalStatusCodes = options.fatalStatusCodes ?? [];
+const createInitialState = (): ContextState => ({
+  cookies: {
+    sessionid: "",
+    mid: "",
+    ig_pr: "1",
+    ig_vw: "1920",
+    csrftoken: "",
+    s_network: "",
+    ds_user_id: "",
+  },
+  csrfToken: "",
+  username: null,
+  userId: null,
+  errorLog: [],
+  iphoneHeaders: defaultIphoneHeaders(),
+  twoFactorAuthPending: null,
+  queryTimestamps: new Map(),
+  earliestNextRequestTime: 0,
+  iphoneEarliestNextRequestTime: 0,
+  profileIdCache: new Map(),
+});
 
-    this.initAnonymousSession();
+export interface InstaloaderContextShape {
+  readonly options: Required<InstaloaderContextOptions>;
+  readonly stateRef: Ref.Ref<ContextState>;
 
-    this.rateController = options.rateController
-      ? options.rateController(this)
-      : new RateController(this);
-  }
+  readonly isLoggedIn: Effect.Effect<boolean>;
+  readonly getUsername: Effect.Effect<string | null>;
+  readonly getUserId: Effect.Effect<string | null>;
 
-  private initAnonymousSession(): void {
-    this.cookies = {
-      sessionid: "",
-      mid: "",
-      ig_pr: "1",
-      ig_vw: "1920",
-      csrftoken: "",
-      s_network: "",
-      ds_user_id: "",
-    };
-    this.csrfToken = "";
-  }
+  readonly log: (...msg: unknown[]) => Effect.Effect<void>;
+  readonly error: (msg: string, repeatAtEnd?: boolean) => Effect.Effect<void>;
+  readonly hasStoredErrors: Effect.Effect<boolean>;
+  readonly close: Effect.Effect<void>;
 
-  get isLoggedIn(): boolean {
-    return this.username !== null;
-  }
+  readonly saveSession: Effect.Effect<CookieJar>;
+  readonly updateCookies: (cookies: CookieJar) => Effect.Effect<void>;
+  readonly loadSession: (username: string, sessionData: CookieJar) => Effect.Effect<void>;
 
-  log(...msg: unknown[]): void {
-    if (!this.quiet) {
-      console.log(...msg);
-    }
-  }
+  readonly testLogin: Effect.Effect<string | null, ContextError>;
+  readonly login: (user: string, passwd: string) => Effect.Effect<void, ContextError>;
+  readonly twoFactorLogin: (code: string) => Effect.Effect<void, ContextError>;
 
-  error(msg: string, repeatAtEnd = true): void {
-    console.error(msg);
-    if (repeatAtEnd) {
-      this.errorLog.push(msg);
-    }
-  }
+  readonly doSleep: Effect.Effect<void>;
 
-  get hasStoredErrors(): boolean {
-    return this.errorLog.length > 0;
-  }
-
-  close(): void {
-    if (this.errorLog.length > 0 && !this.quiet) {
-      console.error("\nErrors or warnings occurred:");
-      for (const err of this.errorLog) {
-        console.error(err);
-      }
-    }
-  }
-
-  private defaultHttpHeaders(emptySessionOnly = false): Record<string, string> {
-    const headers: Record<string, string> = {
-      "Accept-Encoding": "gzip, deflate",
-      "Accept-Language": "en-US,en;q=0.8",
-      Connection: "keep-alive",
-      "Content-Length": "0",
-      Host: "www.instagram.com",
-      Origin: "https://www.instagram.com",
-      Referer: "https://www.instagram.com/",
-      "User-Agent": this.userAgent,
-      "X-Instagram-AJAX": "1",
-      "X-Requested-With": "XMLHttpRequest",
-    };
-
-    if (emptySessionOnly) {
-      delete headers["Host"];
-      delete headers["Origin"];
-      delete headers["X-Instagram-AJAX"];
-      delete headers["X-Requested-With"];
-    }
-
-    return headers;
-  }
-
-  private getCookieHeader(): string {
-    return Object.entries(this.cookies)
-      .map(([k, v]) => `${k}=${v}`)
-      .join("; ");
-  }
-
-  private parseCookies(setCookieHeaders: string[]): void {
-    for (const header of setCookieHeaders) {
-      const match = header.match(/^([^=]+)=([^;]*)/);
-      if (match) {
-        const [, name, value] = match;
-        if (name && value !== undefined) {
-          this.cookies[name] = value;
-        }
-      }
-    }
-    if (this.cookies["csrftoken"]) {
-      this.csrfToken = this.cookies["csrftoken"];
-    }
-  }
-
-  saveSession(): CookieJar {
-    return { ...this.cookies };
-  }
-
-  updateCookies(cookies: CookieJar): void {
-    Object.assign(this.cookies, cookies);
-  }
-
-  loadSession(username: string, sessionData: CookieJar): void {
-    this.cookies = { ...sessionData };
-    this.csrfToken = sessionData["csrftoken"] ?? "";
-    this.username = username;
-  }
-
-  async testLogin(): Promise<string | null> {
-    try {
-      const data = await this.graphqlQuery(
-        "d6f4427fbe92d846298cf93df0b937d3",
-        {},
-      );
-      const dataObj = data["data"] as Record<string, unknown> | undefined;
-      const user = dataObj?.["user"] as Record<string, unknown> | undefined;
-      return (user?.["username"] as string) ?? null;
-    } catch (err) {
-      if (
-        err instanceof AbortDownloadException ||
-        err instanceof ConnectionException
-      ) {
-        this.error(`Error when checking if logged in: ${err.message}`);
-        return null;
-      }
-      throw err;
-    }
-  }
-
-  async login(user: string, passwd: string): Promise<void> {
-    this.initAnonymousSession();
-
-    const initialResp = await this.fetchWithRetry(
-      "https://www.instagram.com/",
-      {
-        headers: this.defaultHttpHeaders(true),
-      },
-    );
-
-    const setCookies = initialResp.headers.getSetCookie();
-    this.parseCookies(setCookies);
-
-    await this.doSleep();
-
-    const encPassword = `#PWD_INSTAGRAM_BROWSER:0:${Math.floor(Date.now() / 1000)}:${passwd}`;
-
-    const loginHeaders = {
-      ...this.defaultHttpHeaders(),
-      "X-CSRFToken": this.csrfToken,
-      Cookie: this.getCookieHeader(),
-      "Content-Type": "application/x-www-form-urlencoded",
-    };
-
-    const loginBody = new URLSearchParams({
-      enc_password: encPassword,
-      username: user,
-    });
-
-    const loginResp = await this.fetchWithRetry(
-      "https://www.instagram.com/api/v1/web/accounts/login/ajax/",
-      {
-        method: "POST",
-        headers: loginHeaders,
-        body: loginBody.toString(),
-        redirect: "manual",
-      },
-    );
-
-    this.parseCookies(loginResp.headers.getSetCookie());
-
-    let respJson: Record<string, unknown>;
-    try {
-      respJson = (await loginResp.json()) as Record<string, unknown>;
-    } catch {
-      throw new LoginException(
-        `Login error: JSON decode fail, ${loginResp.status} - ${loginResp.statusText}.`,
-      );
-    }
-
-    if (respJson["two_factor_required"]) {
-      const twoFactorInfo = respJson["two_factor_info"] as Record<
-        string,
-        unknown
-      >;
-      this.twoFactorAuthPending = {
-        cookies: { ...this.cookies },
-        csrfToken: this.csrfToken,
-        user,
-        twoFactorId: twoFactorInfo["two_factor_identifier"] as string,
-      };
-      throw new TwoFactorAuthRequiredException(
-        "Login error: two-factor authentication required.",
-        twoFactorInfo["two_factor_identifier"] as string,
-      );
-    }
-
-    if (respJson["checkpoint_url"]) {
-      throw new LoginException(
-        `Login: Checkpoint required. Point your browser to ${respJson["checkpoint_url"]} - follow the instructions, then retry.`,
-      );
-    }
-
-    if (respJson["status"] !== "ok") {
-      const message = respJson["message"]
-        ? `"${respJson["status"]}" status, message "${respJson["message"]}".`
-        : `"${respJson["status"]}" status.`;
-      throw new LoginException(`Login error: ${message}`);
-    }
-
-    if (!("authenticated" in respJson)) {
-      const message = respJson["message"]
-        ? `Unexpected response, "${respJson["message"]}".`
-        : "Unexpected response, this might indicate a blocked IP.";
-      throw new LoginException(`Login error: ${message}`);
-    }
-
-    if (!respJson["authenticated"]) {
-      if (respJson["user"]) {
-        throw new BadCredentialsException("Login error: Wrong password.");
-      } else {
-        throw new LoginException(
-          `Login error: User ${user} does not exist.`,
-        );
-      }
-    }
-
-    this.username = user;
-    this.userId = respJson["userId"] as string;
-  }
-
-  async twoFactorLogin(twoFactorCode: string): Promise<void> {
-    if (!this.twoFactorAuthPending) {
-      throw new InvalidArgumentException(
-        "No two-factor authentication pending.",
-      );
-    }
-
-    const { cookies, csrfToken, user, twoFactorId } = this.twoFactorAuthPending;
-    this.cookies = cookies;
-    this.csrfToken = csrfToken;
-
-    const loginBody = new URLSearchParams({
-      username: user,
-      verificationCode: twoFactorCode,
-      identifier: twoFactorId,
-    });
-
-    const loginResp = await this.fetchWithRetry(
-      "https://www.instagram.com/accounts/login/ajax/two_factor/",
-      {
-        method: "POST",
-        headers: {
-          ...this.defaultHttpHeaders(),
-          "X-CSRFToken": this.csrfToken,
-          Cookie: this.getCookieHeader(),
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: loginBody.toString(),
-        redirect: "manual",
-      },
-    );
-
-    this.parseCookies(loginResp.headers.getSetCookie());
-
-    const respJson = (await loginResp.json()) as Record<string, unknown>;
-
-    if (respJson["status"] !== "ok") {
-      const message = respJson["message"]
-        ? `${respJson["message"]}`
-        : `"${respJson["status"]}" status.`;
-      throw new BadCredentialsException(`2FA error: ${message}`);
-    }
-
-    this.username = user;
-    this.twoFactorAuthPending = null;
-  }
-
-  async doSleep(): Promise<void> {
-    if (this.sleep) {
-      const sleepTime = Math.min(-Math.log(Math.random()) / 0.6, 15.0);
-      await new Promise((resolve) =>
-        setTimeout(resolve, sleepTime * 1000),
-      );
-    }
-  }
-
-  private responseError(resp: Response, body?: string): string {
-    let extraFromJson: string | null = null;
-    if (body) {
-      try {
-        const respJson = JSON.parse(body) as Record<string, unknown>;
-        if ("status" in respJson) {
-          extraFromJson =
-            "message" in respJson
-              ? `"${respJson["status"]}" status, message "${respJson["message"]}"`
-              : `"${respJson["status"]}" status`;
-        }
-      } catch {
-      }
-    }
-
-    return `${resp.status} ${resp.statusText}${extraFromJson ? ` - ${extraFromJson}` : ""} when accessing ${resp.url}`;
-  }
-
-  private async fetchWithRetry(
-    url: string,
-    options: RequestInit,
-  ): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(
-      () => controller.abort(),
-      this.requestTimeout,
-    );
-
-    try {
-      const resp = await fetch(url, {
-        ...options,
-        signal: controller.signal,
-      });
-      return resp;
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-
-  async getJson(
+  readonly getJson: (
     path: string,
     params: Record<string, string>,
-    options: {
-      host?: string;
-      usePost?: boolean;
-      attempt?: number;
-    } = {},
-  ): Promise<Record<string, unknown>> {
-    const { host = "www.instagram.com", usePost = false, attempt = 1 } = options;
+    options?: { host?: string; usePost?: boolean; attempt?: number }
+  ) => Effect.Effect<Record<string, unknown>, ContextError>;
 
-    const isGraphqlQuery =
-      "query_hash" in params && path.includes("graphql/query");
-    const isDocIdQuery = "doc_id" in params && path.includes("graphql/query");
-    const isIphoneQuery = host === "i.instagram.com";
-    const isOtherQuery =
-      !isGraphqlQuery && !isDocIdQuery && host === "www.instagram.com";
-
-    try {
-      await this.doSleep();
-
-      if (isGraphqlQuery) {
-        await this.rateController.waitBeforeQuery(params["query_hash"]!);
-      }
-      if (isDocIdQuery) {
-        await this.rateController.waitBeforeQuery(params["doc_id"]!);
-      }
-      if (isIphoneQuery) {
-        await this.rateController.waitBeforeQuery("iphone");
-      }
-      if (isOtherQuery) {
-        await this.rateController.waitBeforeQuery("other");
-      }
-
-      let url: string;
-      let fetchOptions: RequestInit;
-
-      const headers: Record<string, string> = {
-        ...this.defaultHttpHeaders(true),
-        authority: "www.instagram.com",
-        scheme: "https",
-        accept: "*/*",
-        "X-CSRFToken": this.csrfToken,
-        Cookie: this.getCookieHeader(),
-      };
-      delete headers["Connection"];
-      delete headers["Content-Length"];
-
-      if (usePost) {
-        url = `https://${host}/${path}`;
-        fetchOptions = {
-          method: "POST",
-          headers: {
-            ...headers,
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: new URLSearchParams(params).toString(),
-          redirect: "manual",
-        };
-      } else {
-        const searchParams = new URLSearchParams(params);
-        url = `https://${host}/${path}?${searchParams.toString()}`;
-        fetchOptions = {
-          method: "GET",
-          headers,
-          redirect: "manual",
-        };
-      }
-
-      const resp = await this.fetchWithRetry(url, fetchOptions);
-
-      if (this.fatalStatusCodes.includes(resp.status)) {
-        const body = await resp.text();
-        throw new AbortDownloadException(
-          `Query to ${url} responded with "${resp.status} ${resp.statusText}"${body ? `: ${body.slice(0, 500)}` : ""}`,
-        );
-      }
-
-      if (resp.status >= 300 && resp.status < 400) {
-        const location = resp.headers.get("location");
-        if (
-          location?.startsWith("https://www.instagram.com/accounts/login") ||
-          location?.startsWith("https://i.instagram.com/accounts/login")
-        ) {
-          if (!this.isLoggedIn) {
-            throw new LoginRequiredException(
-              "Redirected to login page. Use login() first.",
-            );
-          }
-          throw new AbortDownloadException(
-            "Redirected to login page. You've been logged out, please wait some time, recreate the session and try again",
-          );
-        }
-      }
-
-      const bodyText = await resp.text();
-
-      if (resp.status === 400) {
-        try {
-          const respJson = JSON.parse(bodyText) as Record<string, unknown>;
-          if (
-            ["feedback_required", "checkpoint_required", "challenge_required"].includes(
-              respJson["message"] as string,
-            )
-          ) {
-            throw new AbortDownloadException(
-              this.responseError(resp, bodyText),
-            );
-          }
-        } catch (e) {
-          if (e instanceof AbortDownloadException) throw e;
-        }
-        throw new QueryReturnedBadRequestException(
-          this.responseError(resp, bodyText),
-        );
-      }
-
-      if (resp.status === 404) {
-        throw new QueryReturnedNotFoundException(
-          this.responseError(resp, bodyText),
-        );
-      }
-
-      if (resp.status === 429) {
-        throw new TooManyRequestsException(this.responseError(resp, bodyText));
-      }
-
-      if (resp.status !== 200) {
-        throw new ConnectionException(this.responseError(resp, bodyText));
-      }
-
-      const respJson = JSON.parse(bodyText) as Record<string, unknown>;
-
-      if (respJson["status"] && respJson["status"] !== "ok") {
-        throw new ConnectionException(this.responseError(resp, bodyText));
-      }
-
-      return respJson;
-    } catch (err) {
-      if (
-        err instanceof InstaloaderException ||
-        err instanceof AbortDownloadException
-      ) {
-        const errorString = `JSON Query to ${path}: ${err.message}`;
-
-        if (attempt >= this.maxConnectionAttempts) {
-          if (err instanceof QueryReturnedNotFoundException) {
-            throw new QueryReturnedNotFoundException(errorString);
-          }
-          throw new ConnectionException(errorString);
-        }
-
-        this.error(`${errorString} [retrying]`, false);
-
-        if (err instanceof TooManyRequestsException) {
-          if (isGraphqlQuery) {
-            await this.rateController.handle429(params["query_hash"]!);
-          }
-          if (isDocIdQuery) {
-            await this.rateController.handle429(params["doc_id"]!);
-          }
-          if (isIphoneQuery) {
-            await this.rateController.handle429("iphone");
-          }
-          if (isOtherQuery) {
-            await this.rateController.handle429("other");
-          }
-        }
-
-        return this.getJson(path, params, {
-          host,
-          usePost,
-          attempt: attempt + 1,
-        });
-      }
-      throw err;
-    }
-  }
-
-  async graphqlQuery(
+  readonly graphqlQuery: (
     queryHash: string,
     variables: Record<string, unknown>,
-    referer?: string,
-  ): Promise<Record<string, unknown>> {
-    const params: Record<string, string> = {
-      query_hash: queryHash,
-      variables: JSON.stringify(variables),
-    };
+    referer?: string
+  ) => Effect.Effect<Record<string, unknown>, ContextError>;
 
-    if (referer) {
-      void referer;
-    }
-
-    const respJson = await this.getJson("graphql/query", params);
-
-    if (!("status" in respJson)) {
-      this.error('GraphQL response did not contain a "status" field.');
-    }
-
-    return respJson;
-  }
-
-  async docIdGraphqlQuery(
+  readonly docIdGraphqlQuery: (
     docId: string,
     variables: Record<string, unknown>,
-    _referer?: string,
-  ): Promise<Record<string, unknown>> {
-    const params: Record<string, string> = {
-      variables: JSON.stringify(variables),
-      doc_id: docId,
-      server_timestamps: "true",
-    };
+    referer?: string
+  ) => Effect.Effect<Record<string, unknown>, ContextError>;
 
-    const respJson = await this.getJson("graphql/query", params, {
-      usePost: true,
-    });
-
-    if (!("status" in respJson)) {
-      this.error('GraphQL response did not contain a "status" field.');
-    }
-
-    return respJson;
-  }
-
-  async getIphoneJson(
+  readonly getIphoneJson: (
     path: string,
-    params: Record<string, string>,
-  ): Promise<Record<string, unknown>> {
-    const headers: Record<string, string> = {
-      ...this.iphoneHeaders,
-      "ig-intended-user-id": this.userId ?? "",
-      "x-pigeon-rawclienttime": (Date.now() / 1000).toFixed(6),
-      Cookie: this.getCookieHeader(),
-      "User-Agent": this.iphoneHeaders["User-Agent"] ?? defaultIphoneHeaders()["User-Agent"] ?? "",
-    };
+    params: Record<string, string>
+  ) => Effect.Effect<Record<string, unknown>, ContextError>;
 
-    const headerCookiesMapping: Record<string, string> = {
-      "x-mid": "mid",
-      "ig-u-ds-user-id": "ds_user_id",
-      "x-ig-device-id": "ig_did",
-      "x-ig-family-device-id": "ig_did",
-      family_device_id: "ig_did",
-    };
-
-    for (const [headerKey, cookieKey] of Object.entries(headerCookiesMapping)) {
-      if (this.cookies[cookieKey] && !headers[headerKey]) {
-        headers[headerKey] = this.cookies[cookieKey];
-      }
-    }
-
-    if (this.cookies["rur"] && !headers["ig-u-rur"]) {
-      headers["ig-u-rur"] = this.cookies["rur"].replace(/"/g, "");
-    }
-
-    for (const header of [
-      "Host",
-      "Origin",
-      "X-Instagram-AJAX",
-      "X-Requested-With",
-      "Referer",
-    ]) {
-      delete headers[header];
-    }
-
-    const searchParams = new URLSearchParams(params);
-    const url = `https://i.instagram.com/${path}${searchParams.toString() ? `?${searchParams.toString()}` : ""}`;
-
-    const resp = await this.fetchWithRetry(url, {
-      method: "GET",
-      headers,
-    });
-
-    resp.headers.forEach((value, key) => {
-      if (key.startsWith("ig-set-")) {
-        this.iphoneHeaders[key.replace("ig-set-", "")] = value;
-      } else if (key.startsWith("x-ig-set-")) {
-        this.iphoneHeaders[key.replace("x-ig-set-", "x-ig-")] = value;
-      }
-    });
-
-    const bodyText = await resp.text();
-    
-    if (resp.status === 404) {
-      throw new QueryReturnedNotFoundException(
-        this.responseError(resp, bodyText),
-      );
-    }
-
-    if (resp.status !== 200) {
-      throw new ConnectionException(this.responseError(resp, bodyText));
-    }
-
-    try {
-      return JSON.parse(bodyText) as Record<string, unknown>;
-    } catch {
-      throw new BadResponseException(
-        `Failed to parse JSON response from ${url}: ${bodyText.slice(0, 200)}`,
-      );
-    }
-  }
-
-  async getRaw(url: string): Promise<Response> {
-    const resp = await this.fetchWithRetry(url, {
-      method: "GET",
-      headers: this.defaultHttpHeaders(true),
-    });
-
-    if (resp.status === 200) {
-      return resp;
-    }
-
-    if (resp.status === 403) {
-      throw new QueryReturnedForbiddenException(
-        this.responseError(resp),
-      );
-    }
-
-    if (resp.status === 404) {
-      throw new QueryReturnedNotFoundException(this.responseError(resp));
-    }
-
-    throw new ConnectionException(this.responseError(resp));
-  }
-
-  async head(url: string, allowRedirects = false): Promise<Response> {
-    const resp = await this.fetchWithRetry(url, {
-      method: "HEAD",
-      headers: this.defaultHttpHeaders(true),
-      redirect: allowRedirects ? "follow" : "manual",
-    });
-
-    if (resp.status === 200) {
-      return resp;
-    }
-
-    if (resp.status === 403) {
-      throw new QueryReturnedForbiddenException(this.responseError(resp));
-    }
-
-    if (resp.status === 404) {
-      throw new QueryReturnedNotFoundException(this.responseError(resp));
-    }
-
-    throw new ConnectionException(this.responseError(resp));
-  }
+  readonly getRaw: (url: string) => Effect.Effect<Response, ContextError>;
+  readonly head: (url: string, allowRedirects?: boolean) => Effect.Effect<Response, ContextError>;
 }
 
-export class RateController {
-  private context: InstaloaderContext;
-  private queryTimestamps: Map<string, number[]> = new Map();
-  private earliestNextRequestTime = 0;
-  private iphoneEarliestNextRequestTime = 0;
+// Helper functions
+const defaultHttpHeaders = (userAgent: string, emptySessionOnly = false): Record<string, string> => {
+  const headers: Record<string, string> = {
+    "Accept-Encoding": "gzip, deflate",
+    "Accept-Language": "en-US,en;q=0.8",
+    Connection: "keep-alive",
+    "Content-Length": "0",
+    Host: "www.instagram.com",
+    Origin: "https://www.instagram.com",
+    Referer: "https://www.instagram.com/",
+    "User-Agent": userAgent,
+    "X-Instagram-AJAX": "1",
+    "X-Requested-With": "XMLHttpRequest",
+  };
 
-  constructor(context: InstaloaderContext) {
-    this.context = context;
+  if (emptySessionOnly) {
+    delete headers["Host"];
+    delete headers["Origin"];
+    delete headers["X-Instagram-AJAX"];
+    delete headers["X-Requested-With"];
   }
 
-  async sleep(secs: number): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, secs * 1000));
-  }
+  return headers;
+};
 
-  countPerSlidingWindow(queryType: string): number {
-    return queryType === "other" ? 75 : 200;
-  }
+const getCookieHeader = (cookies: CookieJar): string =>
+  Object.entries(cookies)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
 
-  private reqsInSlidingWindow(
-    queryType: string | null,
-    currentTime: number,
-    window: number,
-  ): number[] {
-    if (queryType !== null) {
-      const timestamps = this.queryTimestamps.get(queryType) ?? [];
-      return timestamps.filter((t) => t > currentTime - window);
-    }
-
-    const allTimestamps: number[] = [];
-    for (const [type, timestamps] of this.queryTimestamps.entries()) {
-      if (type !== "iphone" && type !== "other") {
-        allTimestamps.push(
-          ...timestamps.filter((t) => t > currentTime - window),
-        );
+const parseCookies = (setCookieHeaders: string[], state: ContextState): void => {
+  for (const header of setCookieHeaders) {
+    const match = header.match(/^([^=]+)=([^;]*)/);
+    if (match) {
+      const [, name, value] = match;
+      if (name && value !== undefined) {
+        state.cookies[name] = value;
       }
     }
-    return allTimestamps;
+  }
+  if (state.cookies["csrftoken"]) {
+    state.csrfToken = state.cookies["csrftoken"];
+  }
+};
+
+const responseError = (resp: Response, body?: string): string => {
+  let extraFromJson: string | null = null;
+  if (body) {
+    try {
+      const respJson = JSON.parse(body) as Record<string, unknown>;
+      if ("status" in respJson) {
+        extraFromJson =
+          "message" in respJson
+            ? `"${respJson["status"]}" status, message "${respJson["message"]}"`
+            : `"${respJson["status"]}" status`;
+      }
+    } catch {
+      // Ignore JSON parse errors
+    }
+  }
+  return `${resp.status} ${resp.statusText}${extraFromJson ? ` - ${extraFromJson}` : ""} when accessing ${resp.url}`;
+};
+
+// Rate controller functions
+const countPerSlidingWindow = (queryType: string): number =>
+  queryType === "other" ? 75 : 200;
+
+const reqsInSlidingWindow = (
+  queryTimestamps: Map<string, number[]>,
+  queryType: string | null,
+  currentTime: number,
+  window: number
+): number[] => {
+  if (queryType !== null) {
+    const timestamps = queryTimestamps.get(queryType) ?? [];
+    return timestamps.filter((t) => t > currentTime - window);
   }
 
-  queryWaittime(
-    queryType: string,
-    currentTime: number,
-    untrackedQueries = false,
-  ): number {
-    const perTypeSlidingWindow = 660;
-    const iphoneSlidingWindow = 1800;
-
-    if (!this.queryTimestamps.has(queryType)) {
-      this.queryTimestamps.set(queryType, []);
+  const allTimestamps: number[] = [];
+  for (const [type, timestamps] of queryTimestamps.entries()) {
+    if (type !== "iphone" && type !== "other") {
+      allTimestamps.push(...timestamps.filter((t) => t > currentTime - window));
     }
+  }
+  return allTimestamps;
+};
 
-    const timestamps = this.queryTimestamps.get(queryType)!;
-    this.queryTimestamps.set(
+const queryWaittime = (
+  state: ContextState,
+  queryType: string,
+  currentTime: number,
+  untrackedQueries = false
+): number => {
+  const perTypeSlidingWindow = 660;
+  const iphoneSlidingWindow = 1800;
+
+  if (!state.queryTimestamps.has(queryType)) {
+    state.queryTimestamps.set(queryType, []);
+  }
+
+  const timestamps = state.queryTimestamps.get(queryType)!;
+  state.queryTimestamps.set(
+    queryType,
+    timestamps.filter((t) => t > currentTime - 3600)
+  );
+
+  const perTypeNextRequestTime = (): number => {
+    const reqs = reqsInSlidingWindow(
+      state.queryTimestamps,
       queryType,
-      timestamps.filter((t) => t > currentTime - 3600),
+      currentTime,
+      perTypeSlidingWindow
     );
+    if (reqs.length < countPerSlidingWindow(queryType)) {
+      return 0;
+    }
+    return Math.min(...reqs) + perTypeSlidingWindow + 6;
+  };
 
-    const perTypeNextRequestTime = (): number => {
-      const reqs = this.reqsInSlidingWindow(
-        queryType,
-        currentTime,
-        perTypeSlidingWindow,
-      );
-      if (reqs.length < this.countPerSlidingWindow(queryType)) {
-        return 0;
-      }
-      return Math.min(...reqs) + perTypeSlidingWindow + 6;
-    };
+  const gqlAccumulatedNextRequestTime = (): number => {
+    if (queryType === "iphone" || queryType === "other") {
+      return 0;
+    }
+    const gqlAccumulatedSlidingWindow = 600;
+    const gqlAccumulatedMaxCount = 275;
+    const reqs = reqsInSlidingWindow(
+      state.queryTimestamps,
+      null,
+      currentTime,
+      gqlAccumulatedSlidingWindow
+    );
+    if (reqs.length < gqlAccumulatedMaxCount) {
+      return 0;
+    }
+    return Math.min(...reqs) + gqlAccumulatedSlidingWindow;
+  };
 
-    const gqlAccumulatedNextRequestTime = (): number => {
-      if (queryType === "iphone" || queryType === "other") {
-        return 0;
-      }
-      const gqlAccumulatedSlidingWindow = 600;
-      const gqlAccumulatedMaxCount = 275;
-      const reqs = this.reqsInSlidingWindow(
-        null,
-        currentTime,
-        gqlAccumulatedSlidingWindow,
-      );
-      if (reqs.length < gqlAccumulatedMaxCount) {
-        return 0;
-      }
-      return Math.min(...reqs) + gqlAccumulatedSlidingWindow;
-    };
-
-    const untrackedNextRequestTime = (): number => {
-      if (untrackedQueries) {
-        if (queryType === "iphone") {
-          const reqs = this.reqsInSlidingWindow(
-            queryType,
-            currentTime,
-            iphoneSlidingWindow,
-          );
-          if (reqs.length > 0) {
-            this.iphoneEarliestNextRequestTime =
-              Math.min(...reqs) + iphoneSlidingWindow + 18;
-          }
-        } else {
-          const reqs = this.reqsInSlidingWindow(
-            queryType,
-            currentTime,
-            perTypeSlidingWindow,
-          );
-          if (reqs.length > 0) {
-            this.earliestNextRequestTime =
-              Math.min(...reqs) + perTypeSlidingWindow + 6;
-          }
-        }
-      }
-      return Math.max(
-        this.iphoneEarliestNextRequestTime,
-        this.earliestNextRequestTime,
-      );
-    };
-
-    const iphoneNextRequest = (): number => {
+  const untrackedNextRequestTime = (): number => {
+    if (untrackedQueries) {
       if (queryType === "iphone") {
-        const reqs = this.reqsInSlidingWindow(
+        const reqs = reqsInSlidingWindow(
+          state.queryTimestamps,
           queryType,
           currentTime,
-          iphoneSlidingWindow,
+          iphoneSlidingWindow
         );
-        if (reqs.length >= 199) {
-          return Math.min(...reqs) + iphoneSlidingWindow + 18;
+        if (reqs.length > 0) {
+          state.iphoneEarliestNextRequestTime =
+            Math.min(...reqs) + iphoneSlidingWindow + 18;
+        }
+      } else {
+        const reqs = reqsInSlidingWindow(
+          state.queryTimestamps,
+          queryType,
+          currentTime,
+          perTypeSlidingWindow
+        );
+        if (reqs.length > 0) {
+          state.earliestNextRequestTime =
+            Math.min(...reqs) + perTypeSlidingWindow + 6;
         }
       }
-      return 0;
+    }
+    return Math.max(
+      state.iphoneEarliestNextRequestTime,
+      state.earliestNextRequestTime
+    );
+  };
+
+  const iphoneNextRequest = (): number => {
+    if (queryType === "iphone") {
+      const reqs = reqsInSlidingWindow(
+        state.queryTimestamps,
+        queryType,
+        currentTime,
+        iphoneSlidingWindow
+      );
+      if (reqs.length >= 199) {
+        return Math.min(...reqs) + iphoneSlidingWindow + 18;
+      }
+    }
+    return 0;
+  };
+
+  return Math.max(
+    0,
+    Math.max(
+      perTypeNextRequestTime(),
+      gqlAccumulatedNextRequestTime(),
+      untrackedNextRequestTime(),
+      iphoneNextRequest()
+    ) - currentTime
+  );
+};
+
+// Factory function to create a pure Effect-based context
+export const makeInstaloaderContext = (
+  options: InstaloaderContextOptions = {}
+): Effect.Effect<InstaloaderContextShape> =>
+  Effect.gen(function* () {
+    const stateRef = yield* Ref.make(createInitialState());
+
+    const opts: Required<InstaloaderContextOptions> = {
+      sleep: options.sleep ?? true,
+      quiet: options.quiet ?? false,
+      userAgent: options.userAgent ?? defaultUserAgent(),
+      maxConnectionAttempts: options.maxConnectionAttempts ?? 3,
+      requestTimeout: options.requestTimeout ?? 300000,
+      fatalStatusCodes: options.fatalStatusCodes ?? [],
+      iphoneSupport: options.iphoneSupport ?? true,
     };
 
-    return Math.max(
-      0,
-      Math.max(
-        perTypeNextRequestTime(),
-        gqlAccumulatedNextRequestTime(),
-        untrackedNextRequestTime(),
-        iphoneNextRequest(),
-      ) - currentTime,
-    );
-  }
-
-  async waitBeforeQuery(queryType: string): Promise<void> {
-    const currentTime = performance.now() / 1000;
-    const waittime = this.queryWaittime(queryType, currentTime, false);
-
-    if (waittime > 15) {
-      const formatted =
-        waittime <= 666
-          ? `${Math.round(waittime)} seconds`
-          : `${Math.round(waittime / 60)} minutes`;
-      const resumeTime = new Date(Date.now() + waittime * 1000);
-      this.context.log(
-        `\nToo many queries in the last time. Need to wait ${formatted}, until ${resumeTime.toLocaleTimeString()}.`,
+    // Core fetch function with timeout
+    const fetchWithTimeout = (
+      url: string,
+      fetchOptions: RequestInit
+    ): Effect.Effect<Response, ConnectionError> =>
+      pipe(
+        Effect.tryPromise({
+          try: () =>
+            fetch(url, {
+              ...fetchOptions,
+              signal: AbortSignal.timeout(opts.requestTimeout),
+            }),
+          catch: (error) =>
+            new ConnectionError({
+              message: `Fetch failed for ${url}: ${error instanceof Error ? error.message : String(error)}`,
+            }),
+        })
       );
-    }
 
-    if (waittime > 0) {
-      await this.sleep(waittime);
-    }
+    // Log function
+    const log = (...msg: unknown[]): Effect.Effect<void> =>
+      Effect.sync(() => {
+        if (!opts.quiet) {
+          console.log(...msg);
+        }
+      });
 
-    const timestamps = this.queryTimestamps.get(queryType) ?? [];
-    timestamps.push(performance.now() / 1000);
-    this.queryTimestamps.set(queryType, timestamps);
-  }
+    // Error logging function
+    const errorFn = (msg: string, repeatAtEnd = true): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        console.error(msg);
+        if (repeatAtEnd) {
+          yield* Ref.update(stateRef, (s) => ({
+            ...s,
+            errorLog: [...s.errorLog, msg],
+          }));
+        }
+      });
 
-  async handle429(queryType: string): Promise<void> {
-    const currentTime = performance.now() / 1000;
-    const waittime = this.queryWaittime(queryType, currentTime, true);
+    // Sleep effect with random exponential backoff
+    const doSleep: Effect.Effect<void> = Effect.gen(function* () {
+      if (opts.sleep) {
+        const sleepTime = Math.min(-Math.log(Math.random()) / 0.6, 15.0);
+        yield* Effect.sleep(Duration.millis(sleepTime * 1000));
+      }
+    });
 
-    this.context.error(
-      'Instagram responded with HTTP error "429 - Too Many Requests". Please do not run multiple instances of Instaloader in parallel or within short sequence.',
-      false,
-    );
+    // Wait before query (rate limiting)
+    const waitBeforeQuery = (queryType: string): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const state = yield* Ref.get(stateRef);
+        const currentTime = performance.now() / 1000;
+        const waittime = queryWaittime(state, queryType, currentTime, false);
 
-    if (waittime > 1.5) {
-      const formatted =
-        waittime <= 666
-          ? `${Math.round(waittime)} seconds`
-          : `${Math.round(waittime / 60)} minutes`;
-      const resumeTime = new Date(Date.now() + waittime * 1000);
-      this.context.error(
-        `The request will be retried in ${formatted}, at ${resumeTime.toLocaleTimeString()}.`,
-        false,
+        if (waittime > 15) {
+          const formatted =
+            waittime <= 666
+              ? `${Math.round(waittime)} seconds`
+              : `${Math.round(waittime / 60)} minutes`;
+          const resumeTime = new Date(Date.now() + waittime * 1000);
+          yield* log(
+            `\nToo many queries in the last time. Need to wait ${formatted}, until ${resumeTime.toLocaleTimeString()}.`
+          );
+        }
+
+        if (waittime > 0) {
+          yield* Effect.sleep(Duration.millis(waittime * 1000));
+        }
+
+        yield* Ref.update(stateRef, (s) => {
+          const timestamps = s.queryTimestamps.get(queryType) ?? [];
+          timestamps.push(performance.now() / 1000);
+          s.queryTimestamps.set(queryType, timestamps);
+          return s;
+        });
+      });
+
+    // Handle 429 rate limit
+    const handle429 = (queryType: string): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const state = yield* Ref.get(stateRef);
+        const currentTime = performance.now() / 1000;
+        const waittime = queryWaittime(state, queryType, currentTime, true);
+
+        yield* errorFn(
+          'Instagram responded with HTTP error "429 - Too Many Requests". Please do not run multiple instances of Instaloader in parallel or within short sequence.',
+          false
+        );
+
+        if (waittime > 1.5) {
+          const formatted =
+            waittime <= 666
+              ? `${Math.round(waittime)} seconds`
+              : `${Math.round(waittime / 60)} minutes`;
+          const resumeTime = new Date(Date.now() + waittime * 1000);
+          yield* errorFn(
+            `The request will be retried in ${formatted}, at ${resumeTime.toLocaleTimeString()}.`,
+            false
+          );
+        }
+
+        if (waittime > 0) {
+          yield* Effect.sleep(Duration.millis(waittime * 1000));
+        }
+      });
+
+    // Get JSON
+    const getJson = (
+      path: string,
+      params: Record<string, string>,
+      jsonOptions: { host?: string; usePost?: boolean; attempt?: number } = {}
+    ): Effect.Effect<Record<string, unknown>, ContextError> =>
+      Effect.gen(function* () {
+        const { host = "www.instagram.com", usePost = false, attempt = 1 } = jsonOptions;
+        const state = yield* Ref.get(stateRef);
+
+        const isGraphqlQuery =
+          "query_hash" in params && path.includes("graphql/query");
+        const isDocIdQuery = "doc_id" in params && path.includes("graphql/query");
+        const isIphoneQuery = host === "i.instagram.com";
+        const isOtherQuery =
+          !isGraphqlQuery && !isDocIdQuery && host === "www.instagram.com";
+
+        yield* doSleep;
+
+        if (isGraphqlQuery) {
+          yield* waitBeforeQuery(params["query_hash"]!);
+        }
+        if (isDocIdQuery) {
+          yield* waitBeforeQuery(params["doc_id"]!);
+        }
+        if (isIphoneQuery) {
+          yield* waitBeforeQuery("iphone");
+        }
+        if (isOtherQuery) {
+          yield* waitBeforeQuery("other");
+        }
+
+        const headers: Record<string, string> = {
+          ...defaultHttpHeaders(opts.userAgent, true),
+          authority: "www.instagram.com",
+          scheme: "https",
+          accept: "*/*",
+          "X-CSRFToken": state.csrfToken,
+          Cookie: getCookieHeader(state.cookies),
+        };
+        delete headers["Connection"];
+        delete headers["Content-Length"];
+
+        let url: string;
+        let fetchOptions: RequestInit;
+
+        if (usePost) {
+          url = `https://${host}/${path}`;
+          fetchOptions = {
+            method: "POST",
+            headers: {
+              ...headers,
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: new URLSearchParams(params).toString(),
+            redirect: "manual",
+          };
+        } else {
+          const searchParams = new URLSearchParams(params);
+          url = `https://${host}/${path}?${searchParams.toString()}`;
+          fetchOptions = {
+            method: "GET",
+            headers,
+            redirect: "manual",
+          };
+        }
+
+        const result = yield* pipe(
+          fetchWithTimeout(url, fetchOptions),
+          Effect.flatMap((resp) =>
+            Effect.gen(function* () {
+              if (opts.fatalStatusCodes.includes(resp.status)) {
+                const body = yield* Effect.tryPromise({
+                  try: () => resp.text(),
+                  catch: () => new ConnectionError({ message: "Failed to read response body" }),
+                });
+                return yield* Effect.fail(
+                  new AbortDownloadError({
+                    message: `Query to ${url} responded with "${resp.status} ${resp.statusText}"${body ? `: ${body.slice(0, 500)}` : ""}`,
+                  })
+                );
+              }
+
+              if (resp.status >= 300 && resp.status < 400) {
+                const location = resp.headers.get("location");
+                if (
+                  location?.startsWith("https://www.instagram.com/accounts/login") ||
+                  location?.startsWith("https://i.instagram.com/accounts/login")
+                ) {
+                  const currentState = yield* Ref.get(stateRef);
+                  if (currentState.username === null) {
+                    return yield* Effect.fail(
+                      new LoginRequiredError({
+                        message: "Redirected to login page. Use login() first.",
+                      })
+                    );
+                  }
+                  return yield* Effect.fail(
+                    new AbortDownloadError({
+                      message:
+                        "Redirected to login page. You've been logged out, please wait some time, recreate the session and try again",
+                    })
+                  );
+                }
+              }
+
+              const bodyText = yield* Effect.tryPromise({
+                try: () => resp.text(),
+                catch: () => new ConnectionError({ message: "Failed to read response body" }),
+              });
+
+              if (resp.status === 400) {
+                try {
+                  const respJson = JSON.parse(bodyText) as Record<string, unknown>;
+                  if (
+                    ["feedback_required", "checkpoint_required", "challenge_required"].includes(
+                      respJson["message"] as string
+                    )
+                  ) {
+                    return yield* Effect.fail(
+                      new AbortDownloadError({
+                        message: responseError(resp, bodyText),
+                      })
+                    );
+                  }
+                } catch {
+                  // Ignore parse error
+                }
+                return yield* Effect.fail(
+                  new QueryReturnedBadRequestError({
+                    message: responseError(resp, bodyText),
+                  })
+                );
+              }
+
+              if (resp.status === 404) {
+                return yield* Effect.fail(
+                  new QueryReturnedNotFoundError({
+                    message: responseError(resp, bodyText),
+                  })
+                );
+              }
+
+              if (resp.status === 429) {
+                return yield* Effect.fail(
+                  new TooManyRequestsError({
+                    message: responseError(resp, bodyText),
+                  })
+                );
+              }
+
+              if (resp.status !== 200) {
+                return yield* Effect.fail(
+                  new ConnectionError({
+                    message: responseError(resp, bodyText),
+                  })
+                );
+              }
+
+              const respJson = JSON.parse(bodyText) as Record<string, unknown>;
+
+              if (respJson["status"] && respJson["status"] !== "ok") {
+                return yield* Effect.fail(
+                  new ConnectionError({
+                    message: responseError(resp, bodyText),
+                  })
+                );
+              }
+
+              return respJson;
+            })
+          ),
+          Effect.catchAll((err) =>
+            Effect.gen(function* () {
+              if (err instanceof InstaloaderError || err instanceof AbortDownloadError) {
+                const errorString = `JSON Query to ${path}: ${err.message}`;
+
+                if (attempt >= opts.maxConnectionAttempts) {
+                  if (err instanceof QueryReturnedNotFoundError) {
+                    return yield* Effect.fail(
+                      new QueryReturnedNotFoundError({ message: errorString })
+                    );
+                  }
+                  return yield* Effect.fail(
+                    new ConnectionError({ message: errorString })
+                  );
+                }
+
+                yield* errorFn(`${errorString} [retrying]`, false);
+
+                if (err instanceof TooManyRequestsError) {
+                  if (isGraphqlQuery) {
+                    yield* handle429(params["query_hash"]!);
+                  }
+                  if (isDocIdQuery) {
+                    yield* handle429(params["doc_id"]!);
+                  }
+                  if (isIphoneQuery) {
+                    yield* handle429("iphone");
+                  }
+                  if (isOtherQuery) {
+                    yield* handle429("other");
+                  }
+                }
+
+                return yield* getJson(path, params, {
+                  host,
+                  usePost,
+                  attempt: attempt + 1,
+                });
+              }
+              return yield* Effect.fail(err);
+            })
+          )
+        );
+
+        return result;
+      });
+
+    // GraphQL query
+    const graphqlQuery = (
+      queryHash: string,
+      variables: Record<string, unknown>,
+      _referer?: string
+    ): Effect.Effect<Record<string, unknown>, ContextError> =>
+      Effect.gen(function* () {
+        const params: Record<string, string> = {
+          query_hash: queryHash,
+          variables: JSON.stringify(variables),
+        };
+
+        const respJson = yield* getJson("graphql/query", params);
+
+        if (!("status" in respJson)) {
+          yield* errorFn('GraphQL response did not contain a "status" field.');
+        }
+
+        return respJson;
+      });
+
+    // Doc ID GraphQL query
+    const docIdGraphqlQuery = (
+      docId: string,
+      variables: Record<string, unknown>,
+      _referer?: string
+    ): Effect.Effect<Record<string, unknown>, ContextError> =>
+      Effect.gen(function* () {
+        const params: Record<string, string> = {
+          variables: JSON.stringify(variables),
+          doc_id: docId,
+          server_timestamps: "true",
+        };
+
+        const respJson = yield* getJson("graphql/query", params, { usePost: true });
+
+        if (!("status" in respJson)) {
+          yield* errorFn('GraphQL response did not contain a "status" field.');
+        }
+
+        return respJson;
+      });
+
+    // Get iPhone JSON
+    const getIphoneJson = (
+      path: string,
+      params: Record<string, string>
+    ): Effect.Effect<Record<string, unknown>, ContextError> =>
+      Effect.gen(function* () {
+        const state = yield* Ref.get(stateRef);
+
+        const headers: Record<string, string> = {
+          ...state.iphoneHeaders,
+          "ig-intended-user-id": state.userId ?? "",
+          "x-pigeon-rawclienttime": (Date.now() / 1000).toFixed(6),
+          Cookie: getCookieHeader(state.cookies),
+          "User-Agent":
+            state.iphoneHeaders["User-Agent"] ??
+            defaultIphoneHeaders()["User-Agent"] ??
+            "",
+        };
+
+        const headerCookiesMapping: Record<string, string> = {
+          "x-mid": "mid",
+          "ig-u-ds-user-id": "ds_user_id",
+          "x-ig-device-id": "ig_did",
+          "x-ig-family-device-id": "ig_did",
+          family_device_id: "ig_did",
+        };
+
+        for (const [headerKey, cookieKey] of Object.entries(headerCookiesMapping)) {
+          if (state.cookies[cookieKey] && !headers[headerKey]) {
+            headers[headerKey] = state.cookies[cookieKey];
+          }
+        }
+
+        if (state.cookies["rur"] && !headers["ig-u-rur"]) {
+          headers["ig-u-rur"] = state.cookies["rur"].replace(/"/g, "");
+        }
+
+        for (const header of [
+          "Host",
+          "Origin",
+          "X-Instagram-AJAX",
+          "X-Requested-With",
+          "Referer",
+        ]) {
+          delete headers[header];
+        }
+
+        const searchParams = new URLSearchParams(params);
+        const url = `https://i.instagram.com/${path}${searchParams.toString() ? `?${searchParams.toString()}` : ""}`;
+
+        const resp = yield* fetchWithTimeout(url, {
+          method: "GET",
+          headers,
+        });
+
+        // Update iPhone headers from response
+        yield* Ref.update(stateRef, (s) => {
+          const newIphoneHeaders = { ...s.iphoneHeaders };
+          resp.headers.forEach((value, key) => {
+            if (key.startsWith("ig-set-")) {
+              newIphoneHeaders[key.replace("ig-set-", "")] = value;
+            } else if (key.startsWith("x-ig-set-")) {
+              newIphoneHeaders[key.replace("x-ig-set-", "x-ig-")] = value;
+            }
+          });
+          return { ...s, iphoneHeaders: newIphoneHeaders };
+        });
+
+        const bodyText = yield* Effect.tryPromise({
+          try: () => resp.text(),
+          catch: () => new ConnectionError({ message: "Failed to read response body" }),
+        });
+
+        if (resp.status === 404) {
+          return yield* Effect.fail(
+            new QueryReturnedNotFoundError({
+              message: responseError(resp, bodyText),
+            })
+          );
+        }
+
+        if (resp.status !== 200) {
+          return yield* Effect.fail(
+            new ConnectionError({ message: responseError(resp, bodyText) })
+          );
+        }
+
+        try {
+          return JSON.parse(bodyText) as Record<string, unknown>;
+        } catch {
+          return yield* Effect.fail(
+            new BadResponseError({
+              message: `Failed to parse JSON response from ${url}: ${bodyText.slice(0, 200)}`,
+            })
+          );
+        }
+      });
+
+    // Get raw response
+    const getRaw = (url: string): Effect.Effect<Response, ContextError> =>
+      Effect.gen(function* () {
+        const resp = yield* fetchWithTimeout(url, {
+          method: "GET",
+          headers: defaultHttpHeaders(opts.userAgent, true),
+        });
+
+        if (resp.status === 200) {
+          return resp;
+        }
+
+        if (resp.status === 403) {
+          return yield* Effect.fail(
+            new QueryReturnedForbiddenError({
+              message: responseError(resp),
+            })
+          );
+        }
+
+        if (resp.status === 404) {
+          return yield* Effect.fail(
+            new QueryReturnedNotFoundError({ message: responseError(resp) })
+          );
+        }
+
+        return yield* Effect.fail(
+          new ConnectionError({ message: responseError(resp) })
+        );
+      });
+
+    // HEAD request
+    const head = (
+      url: string,
+      allowRedirects = false
+    ): Effect.Effect<Response, ContextError> =>
+      Effect.gen(function* () {
+        const resp = yield* fetchWithTimeout(url, {
+          method: "HEAD",
+          headers: defaultHttpHeaders(opts.userAgent, true),
+          redirect: allowRedirects ? "follow" : "manual",
+        });
+
+        if (resp.status === 200) {
+          return resp;
+        }
+
+        if (resp.status === 403) {
+          return yield* Effect.fail(
+            new QueryReturnedForbiddenError({ message: responseError(resp) })
+          );
+        }
+
+        if (resp.status === 404) {
+          return yield* Effect.fail(
+            new QueryReturnedNotFoundError({ message: responseError(resp) })
+          );
+        }
+
+        return yield* Effect.fail(
+          new ConnectionError({ message: responseError(resp) })
+        );
+      });
+
+    // Test login
+    const testLogin: Effect.Effect<string | null, ContextError> = Effect.gen(function* () {
+      const result = yield* pipe(
+        graphqlQuery("d6f4427fbe92d846298cf93df0b937d3", {}),
+        Effect.map((data) => {
+          const dataObj = data["data"] as Record<string, unknown> | undefined;
+          const user = dataObj?.["user"] as Record<string, unknown> | undefined;
+          return (user?.["username"] as string) ?? null;
+        }),
+        Effect.catchAll((err) =>
+          Effect.gen(function* () {
+            if (err instanceof AbortDownloadError || err instanceof ConnectionError) {
+              yield* errorFn(`Error when checking if logged in: ${err.message}`);
+              return null;
+            }
+            return yield* Effect.fail(err);
+          })
+        )
       );
-    }
+      return result;
+    });
 
-    if (waittime > 0) {
-      await this.sleep(waittime);
-    }
-  }
-}
+    // Login
+    const login = (user: string, passwd: string): Effect.Effect<void, ContextError> =>
+      Effect.gen(function* () {
+        // Reset to anonymous session
+        yield* Ref.update(stateRef, (s) => ({
+          ...s,
+          cookies: {
+            sessionid: "",
+            mid: "",
+            ig_pr: "1",
+            ig_vw: "1920",
+            csrftoken: "",
+            s_network: "",
+            ds_user_id: "",
+          },
+          csrfToken: "",
+        }));
+
+        // Get initial page
+        const initialResp = yield* fetchWithTimeout("https://www.instagram.com/", {
+          headers: defaultHttpHeaders(opts.userAgent, true),
+        });
+
+        yield* Ref.update(stateRef, (s) => {
+          parseCookies(initialResp.headers.getSetCookie(), s);
+          return s;
+        });
+
+        yield* doSleep;
+
+        const state = yield* Ref.get(stateRef);
+        const encPassword = `#PWD_INSTAGRAM_BROWSER:0:${Math.floor(Date.now() / 1000)}:${passwd}`;
+
+        const loginHeaders = {
+          ...defaultHttpHeaders(opts.userAgent),
+          "X-CSRFToken": state.csrfToken,
+          Cookie: getCookieHeader(state.cookies),
+          "Content-Type": "application/x-www-form-urlencoded",
+        };
+
+        const loginBody = new URLSearchParams({
+          enc_password: encPassword,
+          username: user,
+        });
+
+        const loginResp = yield* fetchWithTimeout(
+          "https://www.instagram.com/api/v1/web/accounts/login/ajax/",
+          {
+            method: "POST",
+            headers: loginHeaders,
+            body: loginBody.toString(),
+            redirect: "manual",
+          }
+        );
+
+        yield* Ref.update(stateRef, (s) => {
+          parseCookies(loginResp.headers.getSetCookie(), s);
+          return s;
+        });
+
+        const respJson = yield* Effect.tryPromise({
+          try: () => loginResp.json() as Promise<Record<string, unknown>>,
+          catch: () =>
+            new LoginError({
+              message: `Login error: JSON decode fail, ${loginResp.status} - ${loginResp.statusText}.`,
+            }),
+        });
+
+        if (respJson["two_factor_required"]) {
+          const twoFactorInfo = respJson["two_factor_info"] as Record<string, unknown>;
+          const currentState = yield* Ref.get(stateRef);
+          yield* Ref.update(stateRef, (s) => ({
+            ...s,
+            twoFactorAuthPending: {
+              cookies: { ...currentState.cookies },
+              csrfToken: currentState.csrfToken,
+              user,
+              twoFactorId: twoFactorInfo["two_factor_identifier"] as string,
+            },
+          }));
+          return yield* Effect.fail(
+            new TwoFactorAuthRequiredError({
+              message: "Login error: two-factor authentication required.",
+              twoFactorIdentifier: twoFactorInfo["two_factor_identifier"] as string,
+            })
+          );
+        }
+
+        if (respJson["checkpoint_url"]) {
+          return yield* Effect.fail(
+            new LoginError({
+              message: `Login: Checkpoint required. Point your browser to ${respJson["checkpoint_url"]} - follow the instructions, then retry.`,
+            })
+          );
+        }
+
+        if (respJson["status"] !== "ok") {
+          const message = respJson["message"]
+            ? `"${respJson["status"]}" status, message "${respJson["message"]}".`
+            : `"${respJson["status"]}" status.`;
+          return yield* Effect.fail(
+            new LoginError({ message: `Login error: ${message}` })
+          );
+        }
+
+        if (!("authenticated" in respJson)) {
+          const message = respJson["message"]
+            ? `Unexpected response, "${respJson["message"]}".`
+            : "Unexpected response, this might indicate a blocked IP.";
+          return yield* Effect.fail(
+            new LoginError({ message: `Login error: ${message}` })
+          );
+        }
+
+        if (!respJson["authenticated"]) {
+          if (respJson["user"]) {
+            return yield* Effect.fail(
+              new BadCredentialsError({ message: "Login error: Wrong password." })
+            );
+          } else {
+            return yield* Effect.fail(
+              new LoginError({
+                message: `Login error: User ${user} does not exist.`,
+              })
+            );
+          }
+        }
+
+        yield* Ref.update(stateRef, (s) => ({
+          ...s,
+          username: user,
+          userId: respJson["userId"] as string,
+        }));
+      });
+
+    // Two factor login
+    const twoFactorLogin = (twoFactorCode: string): Effect.Effect<void, ContextError> =>
+      Effect.gen(function* () {
+        const state = yield* Ref.get(stateRef);
+
+        if (!state.twoFactorAuthPending) {
+          return yield* Effect.fail(
+            new InvalidArgumentError({
+              message: "No two-factor authentication pending.",
+            })
+          );
+        }
+
+        const { cookies, csrfToken, user, twoFactorId } = state.twoFactorAuthPending;
+
+        yield* Ref.update(stateRef, (s) => ({
+          ...s,
+          cookies,
+          csrfToken,
+        }));
+
+        const updatedState = yield* Ref.get(stateRef);
+
+        const loginBody = new URLSearchParams({
+          username: user,
+          verificationCode: twoFactorCode,
+          identifier: twoFactorId,
+        });
+
+        const loginResp = yield* fetchWithTimeout(
+          "https://www.instagram.com/accounts/login/ajax/two_factor/",
+          {
+            method: "POST",
+            headers: {
+              ...defaultHttpHeaders(opts.userAgent),
+              "X-CSRFToken": updatedState.csrfToken,
+              Cookie: getCookieHeader(updatedState.cookies),
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: loginBody.toString(),
+            redirect: "manual",
+          }
+        );
+
+        yield* Ref.update(stateRef, (s) => {
+          parseCookies(loginResp.headers.getSetCookie(), s);
+          return s;
+        });
+
+        const respJson = yield* Effect.tryPromise({
+          try: () => loginResp.json() as Promise<Record<string, unknown>>,
+          catch: () =>
+            new BadCredentialsError({ message: "2FA error: JSON decode fail" }),
+        });
+
+        if (respJson["status"] !== "ok") {
+          const message = respJson["message"]
+            ? `${respJson["message"]}`
+            : `"${respJson["status"]}" status.`;
+          return yield* Effect.fail(
+            new BadCredentialsError({ message: `2FA error: ${message}` })
+          );
+        }
+
+        yield* Ref.update(stateRef, (s) => ({
+          ...s,
+          username: user,
+          twoFactorAuthPending: null,
+        }));
+      });
+
+    // Return the context shape
+    const context: InstaloaderContextShape = {
+      options: opts,
+      stateRef,
+
+      isLoggedIn: Effect.map(Ref.get(stateRef), (s) => s.username !== null),
+      getUsername: Effect.map(Ref.get(stateRef), (s) => s.username),
+      getUserId: Effect.map(Ref.get(stateRef), (s) => s.userId),
+
+      log,
+      error: errorFn,
+      hasStoredErrors: Effect.map(Ref.get(stateRef), (s) => s.errorLog.length > 0),
+      close: Effect.gen(function* () {
+        const state = yield* Ref.get(stateRef);
+        if (state.errorLog.length > 0 && !opts.quiet) {
+          console.error("\nErrors or warnings occurred:");
+          for (const err of state.errorLog) {
+            console.error(err);
+          }
+        }
+      }),
+
+      saveSession: Effect.map(Ref.get(stateRef), (s) => ({ ...s.cookies })),
+      updateCookies: (cookies: CookieJar) =>
+        Ref.update(stateRef, (s) => ({
+          ...s,
+          cookies: { ...s.cookies, ...cookies },
+        })),
+      loadSession: (username: string, sessionData: CookieJar) =>
+        Ref.update(stateRef, (s) => ({
+          ...s,
+          cookies: { ...sessionData },
+          csrfToken: sessionData["csrftoken"] ?? "",
+          username,
+        })),
+
+      testLogin,
+      login,
+      twoFactorLogin,
+
+      doSleep,
+
+      getJson,
+      graphqlQuery,
+      docIdGraphqlQuery,
+      getIphoneJson,
+      getRaw,
+      head,
+    };
+
+    return context;
+  });
+
+export const InstaloaderContextLive = (
+  options?: InstaloaderContextOptions
+): Effect.Effect<InstaloaderContextShape> => makeInstaloaderContext(options);

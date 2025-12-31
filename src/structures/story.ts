@@ -1,8 +1,11 @@
-import { InstaloaderContext } from "../core/context.ts";
+import { Effect, Option } from "effect";
+import { type InstaloaderContextShape } from "../core/context.ts";
 import {
-  BadResponseException,
-  IPhoneSupportDisabledException,
-  LoginRequiredException,
+  AbortDownloadError,
+  BadResponseError,
+  IPhoneSupportDisabledError,
+  LoginRequiredError,
+  type InstaloaderErrors,
 } from "../exceptions/index.ts";
 import {
   HASHTAG_REGEX,
@@ -10,274 +13,301 @@ import {
   optionalNormalize,
   type JsonNode,
 } from "./common.ts";
-import { Post } from "./post.ts";
-import { Profile } from "./profile.ts";
+import { mediaidToShortcodeSync } from "./post.ts";
+import {
+  type ProfileData,
+  fromId as profileFromId,
+  userid as profileUserid,
+  username as profileUsername,
+  toDict as profileToDict,
+} from "./profile.ts";
 
-export class StoryItem {
-  private _context: InstaloaderContext;
-  private _node: JsonNode;
-  private _ownerProfile: Profile | null;
-  private _iphoneStruct_: JsonNode | null = null;
+export type StoryError = InstaloaderErrors | AbortDownloadError;
 
-  constructor(
-    context: InstaloaderContext,
-    node: JsonNode,
-    ownerProfile?: Profile,
-  ) {
-    this._context = context;
-    this._node = node;
-    this._ownerProfile = ownerProfile ?? null;
+export interface StoryItemData {
+  readonly node: JsonNode;
+  readonly ownerProfile: ProfileData | null;
+  readonly iphoneStruct: JsonNode | null;
+}
 
-    if ("iphone_struct" in node) {
-      this._iphoneStruct_ = node["iphone_struct"] as JsonNode;
-    }
-  }
+export interface StoryData {
+  readonly node: JsonNode;
+  readonly uniqueId: string | null;
+  readonly ownerProfile: ProfileData | null;
+  readonly iphoneStruct: JsonNode | null;
+}
 
-  _asdict(): JsonNode {
-    const node = { ...this._node };
-    if (this._ownerProfile) {
-      node["owner"] = this._ownerProfile._asdict();
-    }
-    if (this._iphoneStruct_) {
-      node["iphone_struct"] = this._iphoneStruct_;
-    }
-    return node;
-  }
-
-  get mediaid(): number {
-    return Number(this._node["id"]);
-  }
-
-  get shortcode(): string {
-    return Post.mediaidToShortcode(this.mediaid);
-  }
-
-  toString(): string {
-    return `<StoryItem ${this.mediaid}>`;
-  }
-
-  equals(other: StoryItem): boolean {
-    return this.mediaid === other.mediaid;
-  }
-
-  static async fromMediaid(
-    context: InstaloaderContext,
-    mediaid: number,
-  ): Promise<StoryItem> {
-    const picJson = await context.graphqlQuery(
+export const fromMediaidEffect = (
+  context: InstaloaderContextShape,
+  mediaid: number
+): Effect.Effect<StoryItemData, StoryError> =>
+  Effect.gen(function* () {
+    const shortcode = mediaidToShortcodeSync(mediaid);
+    const picJson = yield* context.graphqlQuery(
       "2b0673e0dc4580674a88d426fe00ea90",
-      { shortcode: Post.mediaidToShortcode(mediaid) },
+      { shortcode }
     );
     const shortcodeMedia = (picJson["data"] as JsonNode)["shortcode_media"] as JsonNode | null;
     if (shortcodeMedia === null) {
-      throw new BadResponseException("Fetching StoryItem metadata failed.");
+      return yield* Effect.fail(new BadResponseError({ message: "Fetching StoryItem metadata failed." }));
     }
-    return new StoryItem(context, shortcodeMedia);
-  }
+    return {
+      node: shortcodeMedia,
+      ownerProfile: null,
+      iphoneStruct: null,
+    };
+  });
 
-  async getIphoneStruct(): Promise<JsonNode> {
-    if (!this._context.iphoneSupport) {
-      throw new IPhoneSupportDisabledException("iPhone support is disabled.");
-    }
-    if (!this._context.isLoggedIn) {
-      throw new LoginRequiredException(
-        "Login required to access iPhone media info endpoint.",
-      );
-    }
-    if (!this._iphoneStruct_) {
-      const data = await this._context.getIphoneJson(
-        `api/v1/feed/reels_media/?reel_ids=${this.ownerId}`,
-        {},
-      );
-      this._iphoneStruct_ = {};
-      const reels = data["reels"] as JsonNode;
-      const ownerReel = reels[String(this.ownerId)] as JsonNode;
-      const items = ownerReel["items"] as JsonNode[];
-      for (const item of items) {
-        if (Number(item["pk"]) === this.mediaid) {
-          this._iphoneStruct_ = item;
-          break;
-        }
+export const storyItemFromNode = (node: JsonNode, ownerProfile?: ProfileData): StoryItemData => {
+  const iphoneStruct = "iphone_struct" in node ? (node["iphone_struct"] as JsonNode) : null;
+  return {
+    node,
+    ownerProfile: ownerProfile ?? null,
+    iphoneStruct,
+  };
+};
+
+export const storyItemMediaid = (item: StoryItemData): number =>
+  Number(item.node["id"]);
+
+export const storyItemShortcode = (item: StoryItemData): string =>
+  mediaidToShortcodeSync(storyItemMediaid(item));
+
+export const storyItemToString = (item: StoryItemData): string =>
+  `<StoryItem ${storyItemMediaid(item)}>`;
+
+export const storyItemEquals = (item1: StoryItemData, item2: StoryItemData): boolean =>
+  storyItemMediaid(item1) === storyItemMediaid(item2);
+
+export const storyItemToDict = (item: StoryItemData): JsonNode => {
+  const node = { ...item.node };
+  if (item.ownerProfile) {
+    node["owner"] = profileToDict(item.ownerProfile);
+  }
+  if (item.iphoneStruct) {
+    node["iphone_struct"] = item.iphoneStruct;
+  }
+  return node;
+};
+
+export const storyItemOwnerProfile = (item: StoryItemData): Option.Option<ProfileData> => {
+  if (item.ownerProfile) {
+    return Option.some(item.ownerProfile);
+  }
+  return Option.none();
+};
+
+export const storyItemOwnerUsername = (item: StoryItemData): Option.Option<string> =>
+  Option.map(storyItemOwnerProfile(item), profileUsername);
+
+export const storyItemOwnerId = (item: StoryItemData): Option.Option<number> =>
+  Option.map(storyItemOwnerProfile(item), profileUserid);
+
+export const storyItemDateLocal = (item: StoryItemData): Date => {
+  const timestamp = item.node["taken_at_timestamp"] as number;
+  return new Date(timestamp * 1000);
+};
+
+export const storyItemDateUtc = (item: StoryItemData): Date => {
+  const timestamp = item.node["taken_at_timestamp"] as number;
+  return new Date(timestamp * 1000);
+};
+
+export const storyItemDate = (item: StoryItemData): Date =>
+  storyItemDateUtc(item);
+
+export const storyItemProfile = (item: StoryItemData): Option.Option<string> =>
+  storyItemOwnerUsername(item);
+
+export const storyItemExpiringLocal = (item: StoryItemData): Date => {
+  const timestamp = item.node["expiring_at_timestamp"] as number;
+  return new Date(timestamp * 1000);
+};
+
+export const storyItemExpiringUtc = (item: StoryItemData): Date => {
+  const timestamp = item.node["expiring_at_timestamp"] as number;
+  return new Date(timestamp * 1000);
+};
+
+export const storyItemUrl = (item: StoryItemData): string => {
+  const displayResources = item.node["display_resources"] as JsonNode[];
+  const lastResource = displayResources[displayResources.length - 1];
+  return lastResource ? (lastResource["src"] as string) : "";
+};
+
+export const storyItemTypename = (item: StoryItemData): string =>
+  item.node["__typename"] as string;
+
+export const storyItemCaption = (item: StoryItemData): string | null => {
+  if ("edge_media_to_caption" in item.node) {
+    const captionData = item.node["edge_media_to_caption"] as JsonNode;
+    const edges = captionData["edges"] as JsonNode[];
+    if (edges.length > 0) {
+      const firstEdge = edges[0];
+      if (firstEdge) {
+        const text = (firstEdge["node"] as JsonNode)["text"] as string;
+        return optionalNormalize(text);
       }
     }
-    return this._iphoneStruct_;
+  } else if ("caption" in item.node) {
+    const cap = item.node["caption"];
+    if (typeof cap === "string") {
+      return optionalNormalize(cap);
+    } else if (cap && typeof cap === "object" && "text" in cap) {
+      return optionalNormalize((cap as JsonNode)["text"] as string);
+    }
+    return null;
   }
+  return null;
+};
 
-  get ownerProfile(): Profile {
-    if (!this._ownerProfile) {
-      throw new Error(
-        "Owner profile not loaded. Call getOwnerProfile() instead.",
+export const storyItemCaptionHashtags = (item: StoryItemData): string[] => {
+  const cap = storyItemCaption(item);
+  if (!cap) return [];
+  const matches = cap.toLowerCase().matchAll(HASHTAG_REGEX);
+  return Array.from(matches, (m) => m[1]).filter((s): s is string => s !== undefined);
+};
+
+export const storyItemCaptionMentions = (item: StoryItemData): string[] => {
+  const cap = storyItemCaption(item);
+  if (!cap) return [];
+  const matches = cap.toLowerCase().matchAll(MENTION_REGEX);
+  return Array.from(matches, (m) => m[1]).filter((s): s is string => s !== undefined);
+};
+
+export const storyItemPcaption = (item: StoryItemData): string => {
+  const cap = storyItemCaption(item);
+  if (!cap) return "";
+  const processed = cap
+    .split("\n")
+    .filter((s) => s)
+    .map((s) => s.replace("/", "\u2215"))
+    .join(" ")
+    .trim();
+  return processed.length > 31 ? processed.slice(0, 30) + "\u2026" : processed;
+};
+
+export const storyItemIsVideo = (item: StoryItemData): boolean =>
+  item.node["is_video"] as boolean;
+
+export const storyItemVideoUrl = (item: StoryItemData): string | null => {
+  if (!storyItemIsVideo(item)) return null;
+  const videoResources = item.node["video_resources"] as JsonNode[] | undefined;
+  if (videoResources && videoResources.length > 0) {
+    const lastResource = videoResources[videoResources.length - 1];
+    return lastResource ? (lastResource["src"] as string) : null;
+  }
+  return null;
+};
+
+export const storyItemGetIphoneStruct = (
+  context: InstaloaderContextShape,
+  item: StoryItemData
+): Effect.Effect<JsonNode, StoryError | IPhoneSupportDisabledError | LoginRequiredError> =>
+  Effect.gen(function* () {
+    if (!context.options.iphoneSupport) {
+      return yield* Effect.fail(
+        new IPhoneSupportDisabledError({ message: "iPhone support is disabled." })
       );
     }
-    return this._ownerProfile;
-  }
-
-  async getOwnerProfile(): Promise<Profile> {
-    if (!this._ownerProfile) {
-      const owner = this._node["owner"] as JsonNode;
-      this._ownerProfile = await Profile.fromId(
-        this._context,
-        Number(owner["id"]),
+    const loggedIn = yield* context.isLoggedIn;
+    if (!loggedIn) {
+      return yield* Effect.fail(
+        new LoginRequiredError({
+          message: "Login required to access iPhone media info endpoint.",
+        })
       );
     }
-    return this._ownerProfile;
-  }
+    if (item.iphoneStruct) {
+      return item.iphoneStruct;
+    }
 
-  get ownerUsername(): string {
-    return this.ownerProfile.username;
-  }
+    const ownerId = storyItemOwnerId(item);
+    const data = yield* context.getIphoneJson(
+      `api/v1/feed/reels_media/?reel_ids=${ownerId}`,
+      {}
+    );
+    const reels = data["reels"] as JsonNode;
+    const ownerReel = reels[String(ownerId)] as JsonNode;
+    const items = ownerReel["items"] as JsonNode[];
 
-  async getOwnerUsername(): Promise<string> {
-    const profile = await this.getOwnerProfile();
-    return profile.username;
-  }
+    for (const reelItem of items) {
+      if (Number(reelItem["pk"]) === storyItemMediaid(item)) {
+        return reelItem;
+      }
+    }
+    return {};
+  });
 
-  get ownerId(): number {
-    return this.ownerProfile.userid;
-  }
+export const storyItemGetOwnerProfile = (
+  context: InstaloaderContextShape,
+  item: StoryItemData
+): Effect.Effect<ProfileData, StoryError> =>
+  Effect.gen(function* () {
+    if (item.ownerProfile) {
+      return item.ownerProfile;
+    }
+    const owner = item.node["owner"] as JsonNode;
+    return yield* profileFromId(context, Number(owner["id"]));
+  });
 
-  async getOwnerId(): Promise<number> {
-    const profile = await this.getOwnerProfile();
-    return profile.userid;
-  }
+export const storyItemGetOwnerUsername = (
+  context: InstaloaderContextShape,
+  item: StoryItemData
+): Effect.Effect<string, StoryError> =>
+  Effect.gen(function* () {
+    const profile = yield* storyItemGetOwnerProfile(context, item);
+    return profileUsername(profile);
+  });
 
-  get dateLocal(): Date {
-    const timestamp = this._node["taken_at_timestamp"] as number;
-    return new Date(timestamp * 1000);
-  }
+export const storyItemGetOwnerId = (
+  context: InstaloaderContextShape,
+  item: StoryItemData
+): Effect.Effect<number, StoryError> =>
+  Effect.gen(function* () {
+    const profile = yield* storyItemGetOwnerProfile(context, item);
+    return profileUserid(profile);
+  });
 
-  get dateUtc(): Date {
-    const timestamp = this._node["taken_at_timestamp"] as number;
-    return new Date(timestamp * 1000);
-  }
+export const storyItemGetUrl = (
+  context: InstaloaderContextShape,
+  item: StoryItemData
+): Effect.Effect<string, StoryError> =>
+  Effect.gen(function* () {
+    const typenameVal = storyItemTypename(item);
+    const loggedIn = yield* context.isLoggedIn;
 
-  get date(): Date {
-    return this.dateUtc;
-  }
-
-  get profile(): string {
-    return this.ownerUsername;
-  }
-
-  get expiringLocal(): Date {
-    const timestamp = this._node["expiring_at_timestamp"] as number;
-    return new Date(timestamp * 1000);
-  }
-
-  get expiringUtc(): Date {
-    const timestamp = this._node["expiring_at_timestamp"] as number;
-    return new Date(timestamp * 1000);
-  }
-
-  get url(): string {
-    const displayResources = this._node["display_resources"] as JsonNode[];
-    const lastResource = displayResources[displayResources.length - 1];
-    return lastResource ? (lastResource["src"] as string) : "";
-  }
-
-  async getUrl(): Promise<string> {
-    const typename = this.typename;
     if (
-      (typename === "GraphStoryImage" || typename === "StoryImage") &&
-      this._context.iphoneSupport &&
-      this._context.isLoggedIn
+      (typenameVal === "GraphStoryImage" || typenameVal === "StoryImage") &&
+      context.options.iphoneSupport &&
+      loggedIn
     ) {
-      try {
-        const iphoneStruct = await this.getIphoneStruct();
-        const imageVersions = iphoneStruct["image_versions2"] as JsonNode | undefined;
+      const result = yield* Effect.either(storyItemGetIphoneStruct(context, item));
+      if (result._tag === "Right") {
+        const imageVersions = result.right["image_versions2"] as JsonNode | undefined;
         const candidates = imageVersions?.["candidates"] as JsonNode[] | undefined;
         const firstCandidate = candidates?.[0];
         if (firstCandidate) {
           const origUrl = firstCandidate["url"] as string;
           return origUrl.replace(/([?&])se=\d+&?/g, "$1").replace(/&$/, "");
         }
-      } catch (err) {
-        this._context.error(
-          `Unable to fetch high quality image version of ${this}: ${err}`,
-        );
       }
     }
-    return this.url;
-  }
+    return storyItemUrl(item);
+  });
 
-  get typename(): string {
-    return this._node["__typename"] as string;
-  }
-
-  get caption(): string | null {
-    if ("edge_media_to_caption" in this._node) {
-      const captionData = this._node["edge_media_to_caption"] as JsonNode;
-      const edges = captionData["edges"] as JsonNode[];
-      if (edges.length > 0) {
-        const firstEdge = edges[0];
-        if (firstEdge) {
-          const text = (firstEdge["node"] as JsonNode)["text"] as string;
-          return optionalNormalize(text);
-        }
-      }
-    } else if ("caption" in this._node) {
-      return optionalNormalize(this._node["caption"] as string | null);
-    }
-    return null;
-  }
-
-  get captionHashtags(): string[] {
-    if (!this.caption) {
-      return [];
-    }
-    const matches = this.caption.toLowerCase().matchAll(HASHTAG_REGEX);
-    return Array.from(matches, (m) => m[1]).filter(
-      (s): s is string => s !== undefined,
-    );
-  }
-
-  get captionMentions(): string[] {
-    if (!this.caption) {
-      return [];
-    }
-    const matches = this.caption.toLowerCase().matchAll(MENTION_REGEX);
-    return Array.from(matches, (m) => m[1]).filter(
-      (s): s is string => s !== undefined,
-    );
-  }
-
-  get pcaption(): string {
-    if (!this.caption) {
-      return "";
-    }
-    const pcaption = this.caption
-      .split("\n")
-      .filter((s) => s)
-      .map((s) => s.replace("/", "\u2215"))
-      .join(" ")
-      .trim();
-    return pcaption.length > 31 ? pcaption.slice(0, 30) + "\u2026" : pcaption;
-  }
-
-  get isVideo(): boolean {
-    return this._node["is_video"] as boolean;
-  }
-
-  get videoUrl(): string | null {
-    if (!this.isVideo) {
-      return null;
-    }
-    const videoResources = this._node["video_resources"] as JsonNode[] | undefined;
-    if (videoResources && videoResources.length > 0) {
-      const lastResource = videoResources[videoResources.length - 1];
-      return lastResource ? (lastResource["src"] as string) : null;
-    }
-    return null;
-  }
-
-  async getVideoUrl(): Promise<string | null> {
-    if (!this.isVideo) {
+export const storyItemGetVideoUrl = (
+  context: InstaloaderContextShape,
+  item: StoryItemData
+): Effect.Effect<string | null, StoryError> =>
+  Effect.gen(function* () {
+    if (!storyItemIsVideo(item)) {
       return null;
     }
 
     const versionUrls: string[] = [];
 
-    const videoResources = this._node["video_resources"] as JsonNode[] | undefined;
+    const videoResources = item.node["video_resources"] as JsonNode[] | undefined;
     if (videoResources && videoResources.length > 0) {
       const lastResource = videoResources[videoResources.length - 1];
       if (lastResource) {
@@ -285,19 +315,16 @@ export class StoryItem {
       }
     }
 
-    if (this._context.iphoneSupport && this._context.isLoggedIn) {
-      try {
-        const iphoneStruct = await this.getIphoneStruct();
-        const videoVersions = iphoneStruct["video_versions"] as JsonNode[] | undefined;
+    const loggedIn = yield* context.isLoggedIn;
+    if (context.options.iphoneSupport && loggedIn) {
+      const iphoneResult = yield* Effect.either(storyItemGetIphoneStruct(context, item));
+      if (iphoneResult._tag === "Right") {
+        const videoVersions = iphoneResult.right["video_versions"] as JsonNode[] | undefined;
         if (videoVersions) {
           for (const version of videoVersions) {
             versionUrls.push(version["url"] as string);
           }
         }
-      } catch (err) {
-        this._context.error(
-          `Unable to fetch high-quality video version of ${this}: ${err}`,
-        );
       }
     }
 
@@ -311,20 +338,12 @@ export class StoryItem {
     }
 
     const candidates: Array<[number, string]> = [];
-    for (let idx = 0; idx < uniqueUrls.length; idx++) {
-      const url = uniqueUrls[idx];
-      if (!url) continue;
-      try {
-        const response = await this._context.head(url, true);
-        const contentLength = parseInt(
-          response.headers.get("Content-Length") ?? "0",
-          10,
-        );
-        candidates.push([contentLength, url]);
-      } catch (err) {
-        this._context.error(
-          `Video URL candidate ${idx + 1}/${uniqueUrls.length} for ${this}: ${err}`,
-        );
+    for (const videoUrl of uniqueUrls) {
+      if (!videoUrl) continue;
+      const response = yield* Effect.either(context.head(videoUrl, true));
+      if (response._tag === "Right") {
+        const contentLength = parseInt(response.right.headers.get("Content-Length") ?? "0", 10);
+        candidates.push([contentLength, videoUrl]);
       }
     }
 
@@ -335,134 +354,144 @@ export class StoryItem {
     candidates.sort((a, b) => a[0] - b[0]);
     const lastCandidate = candidates[candidates.length - 1];
     return lastCandidate ? lastCandidate[1] : null;
+  });
+
+export const storyFromNode = (node: JsonNode): StoryData => ({
+  node,
+  uniqueId: null,
+  ownerProfile: null,
+  iphoneStruct: null,
+});
+
+export const storyOwnerProfile = (story: StoryData): ProfileData => {
+  if (story.ownerProfile) {
+    return story.ownerProfile;
   }
-}
+  const user = story.node["user"] as JsonNode;
+  return { node: user, iphoneStruct: null };
+};
 
-export class Story {
-  protected _context: InstaloaderContext;
-  protected _node: JsonNode;
-  protected _uniqueId: string | null = null;
-  protected _ownerProfile: Profile | null = null;
-  protected _iphoneStruct_: JsonNode | null = null;
+export const storyOwnerUsername = (story: StoryData): string =>
+  profileUsername(storyOwnerProfile(story));
 
-  constructor(context: InstaloaderContext, node: JsonNode) {
-    this._context = context;
-    this._node = node;
+export const storyOwnerId = (story: StoryData): number =>
+  profileUserid(storyOwnerProfile(story));
+
+export const storyLastSeenLocal = (story: StoryData): Date | null => {
+  const seen = story.node["seen"] as number | null;
+  if (seen) {
+    return new Date(seen * 1000);
   }
+  return null;
+};
 
-  toString(): string {
-    const date = this.latestMediaUtc;
-    const formatted = date.toISOString().replace(/[:.]/g, "-").slice(0, -5);
-    return `<Story by ${this.ownerUsername} changed ${formatted}_UTC>`;
+export const storyLastSeenUtc = (story: StoryData): Date | null => {
+  const seen = story.node["seen"] as number | null;
+  if (seen) {
+    return new Date(seen * 1000);
   }
+  return null;
+};
 
-  equals(other: Story): boolean {
-    return this.uniqueId === other.uniqueId;
+export const storyLatestMediaLocal = (story: StoryData): Date => {
+  const timestamp = story.node["latest_reel_media"] as number;
+  return new Date(timestamp * 1000);
+};
+
+export const storyLatestMediaUtc = (story: StoryData): Date => {
+  const timestamp = story.node["latest_reel_media"] as number;
+  return new Date(timestamp * 1000);
+};
+
+export const storyItemcount = (story: StoryData): number => {
+  const items = story.node["items"] as JsonNode[];
+  return items.length;
+};
+
+export const storyUniqueId = (story: StoryData): string => {
+  if (story.uniqueId) {
+    return story.uniqueId;
   }
-
-  get uniqueId(): string | number {
-    if (!this._uniqueId) {
-      const idList: number[] = [];
-      for (const item of this.getItemsSync()) {
-        idList.push(item.mediaid);
-      }
-      idList.sort((a, b) => a - b);
-      this._uniqueId = String(this.ownerId) + idList.join("");
-    }
-    return this._uniqueId;
+  const idList: number[] = [];
+  const items = story.node["items"] as JsonNode[];
+  for (const item of items) {
+    idList.push(Number(item["id"]));
   }
+  idList.sort((a, b) => a - b);
+  return String(storyOwnerId(story)) + idList.join("");
+};
 
-  get lastSeenLocal(): Date | null {
-    const seen = this._node["seen"] as number | null;
-    if (seen) {
-      return new Date(seen * 1000);
-    }
-    return null;
-  }
+export const storyToString = (story: StoryData): string => {
+  const date = storyLatestMediaUtc(story);
+  const formatted = date.toISOString().replace(/[:.]/g, "-").slice(0, -5);
+  return `<Story by ${storyOwnerUsername(story)} changed ${formatted}_UTC>`;
+};
 
-  get lastSeenUtc(): Date | null {
-    const seen = this._node["seen"] as number | null;
-    if (seen) {
-      return new Date(seen * 1000);
-    }
-    return null;
-  }
+export const storyEquals = (story1: StoryData, story2: StoryData): boolean =>
+  storyUniqueId(story1) === storyUniqueId(story2);
 
-  get latestMediaLocal(): Date {
-    const timestamp = this._node["latest_reel_media"] as number;
-    return new Date(timestamp * 1000);
-  }
-
-  get latestMediaUtc(): Date {
-    const timestamp = this._node["latest_reel_media"] as number;
-    return new Date(timestamp * 1000);
-  }
-
-  get itemcount(): number {
-    const items = this._node["items"] as JsonNode[];
-    return items.length;
-  }
-
-  get ownerProfile(): Profile {
-    if (!this._ownerProfile) {
-      const user = this._node["user"] as JsonNode;
-      this._ownerProfile = new Profile(this._context, user);
-    }
-    return this._ownerProfile;
-  }
-
-  get ownerUsername(): string {
-    return this.ownerProfile.username;
-  }
-
-  get ownerId(): number {
-    return this.ownerProfile.userid;
-  }
-
-  protected async _fetchIphoneStruct(): Promise<void> {
-    if (
-      this._context.iphoneSupport &&
-      this._context.isLoggedIn &&
-      !this._iphoneStruct_
-    ) {
-      const data = await this._context.getIphoneJson(
-        `api/v1/feed/reels_media/?reel_ids=${this.ownerId}`,
-        {},
-      );
-      const reels = data["reels"] as JsonNode;
-      this._iphoneStruct_ = reels[String(this.ownerId)] as JsonNode;
+export const storyGetItemsSync = (story: StoryData): StoryItemData[] => {
+  const items = story.node["items"] as JsonNode[];
+  const result: StoryItemData[] = [];
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item) {
+      result.push(storyItemFromNode(item, storyOwnerProfile(story)));
     }
   }
+  return result;
+};
 
-  private *getItemsSync(): Generator<StoryItem> {
-    const items = this._node["items"] as JsonNode[];
-    for (let i = items.length - 1; i >= 0; i--) {
-      const item = items[i];
-      if (item) {
-        yield new StoryItem(this._context, item, this.ownerProfile);
-      }
+export const storyFetchIphoneStruct = (
+  context: InstaloaderContextShape,
+  story: StoryData
+): Effect.Effect<JsonNode | null, StoryError> =>
+  Effect.gen(function* () {
+    const loggedIn = yield* context.isLoggedIn;
+    if (!context.options.iphoneSupport || !loggedIn) {
+      return null;
     }
-  }
+    if (story.iphoneStruct) {
+      return story.iphoneStruct;
+    }
+    const data = yield* context.getIphoneJson(
+      `api/v1/feed/reels_media/?reel_ids=${storyOwnerId(story)}`,
+      {}
+    );
+    const reels = data["reels"] as JsonNode;
+    return reels[String(storyOwnerId(story))] as JsonNode;
+  });
 
-  async *getItems(): AsyncGenerator<StoryItem> {
-    await this._fetchIphoneStruct();
-    const items = this._node["items"] as JsonNode[];
+export const storyGetItems = (
+  context: InstaloaderContextShape,
+  story: StoryData
+): Effect.Effect<StoryItemData[], StoryError> =>
+  Effect.gen(function* () {
+    const iphoneStruct = yield* storyFetchIphoneStruct(context, story);
+    const items = story.node["items"] as JsonNode[];
+    const result: StoryItemData[] = [];
 
     for (let i = items.length - 1; i >= 0; i--) {
       const item = items[i];
       if (!item) continue;
 
-      if (this._iphoneStruct_) {
-        const iphoneItems = this._iphoneStruct_["items"] as JsonNode[];
+      let itemIphoneStruct: JsonNode | null = null;
+      if (iphoneStruct) {
+        const iphoneItems = iphoneStruct["items"] as JsonNode[];
         for (const iphoneItem of iphoneItems) {
           if (Number(iphoneItem["pk"]) === Number(item["id"])) {
-            item["iphone_struct"] = iphoneItem;
+            itemIphoneStruct = iphoneItem;
             break;
           }
         }
       }
 
-      yield new StoryItem(this._context, item, this.ownerProfile);
+      result.push({
+        node: itemIphoneStruct ? { ...item, iphone_struct: itemIphoneStruct } : item,
+        ownerProfile: storyOwnerProfile(story),
+        iphoneStruct: itemIphoneStruct,
+      });
     }
-  }
-}
+
+    return result;
+  });

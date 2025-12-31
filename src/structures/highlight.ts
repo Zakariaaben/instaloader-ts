@@ -1,122 +1,154 @@
-import { InstaloaderContext } from "../core/context.ts";
+import { Effect, Option } from "effect";
+import { type InstaloaderContextShape, type ContextError } from "../core/context.ts";
 import { type JsonNode } from "./common.ts";
-import { Profile } from "./profile.ts";
-import { Story, StoryItem } from "./story.ts";
+import { type ProfileData, userid as profileUserid, username as profileUsername } from "./profile.ts";
+import {
+  storyItemFromNode,
+  type StoryItemData,
+} from "./story.ts";
 
-export class Highlight extends Story {
-  private _items: JsonNode[] | null = null;
+export type HighlightError = ContextError;
 
-  constructor(
-    context: InstaloaderContext,
-    node: JsonNode,
-    owner?: Profile,
-  ) {
-    super(context, node);
-    if (owner) {
-      this._ownerProfile = owner;
+export interface HighlightData {
+  readonly node: JsonNode;
+  readonly ownerProfile: ProfileData | null;
+  readonly iphoneStruct: JsonNode | null;
+  readonly items: JsonNode[] | null;
+}
+
+export const highlightFromNode = (node: JsonNode, ownerProfile?: ProfileData): HighlightData => ({
+  node,
+  ownerProfile: ownerProfile ?? null,
+  iphoneStruct: null,
+  items: null,
+});
+
+export const highlightUniqueId = (highlight: HighlightData): number =>
+  Number(highlight.node["id"]);
+
+export const highlightOwnerProfile = (highlight: HighlightData): ProfileData => {
+  if (highlight.ownerProfile) {
+    return highlight.ownerProfile;
+  }
+  const owner = highlight.node["owner"] as JsonNode;
+  return { node: owner, iphoneStruct: null };
+};
+
+export const highlightOwnerUsername = (highlight: HighlightData): string =>
+  profileUsername(highlightOwnerProfile(highlight));
+
+export const highlightOwnerId = (highlight: HighlightData): number =>
+  profileUserid(highlightOwnerProfile(highlight));
+
+export const highlightTitle = (highlight: HighlightData): string =>
+  highlight.node["title"] as string;
+
+export const highlightCoverUrl = (highlight: HighlightData): string => {
+  const coverMedia = highlight.node["cover_media"] as JsonNode;
+  return coverMedia["thumbnail_src"] as string;
+};
+
+export const highlightCoverCroppedUrl = (highlight: HighlightData): string => {
+  const coverMediaCropped = highlight.node["cover_media_cropped_thumbnail"] as JsonNode;
+  return coverMediaCropped["url"] as string;
+};
+
+export const highlightToString = (highlight: HighlightData): string =>
+  `<Highlight by ${highlightOwnerUsername(highlight)}: ${highlightTitle(highlight)}>`;
+
+export const highlightEquals = (h1: HighlightData, h2: HighlightData): boolean =>
+  highlightUniqueId(h1) === highlightUniqueId(h2);
+
+export const highlightItemcount = (highlight: HighlightData): Option.Option<number> => {
+  if (!highlight.items) {
+    return Option.none();
+  }
+  return Option.some(highlight.items.length);
+};
+
+export const highlightFetchItems = (
+  context: InstaloaderContextShape,
+  highlight: HighlightData
+): Effect.Effect<HighlightData, HighlightError> =>
+  Effect.gen(function* () {
+    if (highlight.items) {
+      return highlight;
     }
-  }
-
-  override toString(): string {
-    return `<Highlight by ${this.ownerUsername}: ${this.title}>`;
-  }
-
-  override get uniqueId(): number {
-    return Number(this._node["id"]);
-  }
-
-  override get ownerProfile(): Profile {
-    if (!this._ownerProfile) {
-      const owner = this._node["owner"] as JsonNode;
-      this._ownerProfile = new Profile(this._context, owner);
-    }
-    return this._ownerProfile;
-  }
-
-  get title(): string {
-    return this._node["title"] as string;
-  }
-
-  get coverUrl(): string {
-    const coverMedia = this._node["cover_media"] as JsonNode;
-    return coverMedia["thumbnail_src"] as string;
-  }
-
-  get coverCroppedUrl(): string {
-    const coverMediaCropped = this._node["cover_media_cropped_thumbnail"] as JsonNode;
-    return coverMediaCropped["url"] as string;
-  }
-
-  private async _fetchItems(): Promise<void> {
-    if (!this._items) {
-      const data = await this._context.graphqlQuery(
-        "45246d3fe16ccc6577e0bd297a5db1ab",
-        {
-          reel_ids: [],
-          tag_names: [],
-          location_ids: [],
-          highlight_reel_ids: [String(this.uniqueId)],
-          precomposed_overlay: false,
-        },
-      );
-      const dataNode = data["data"] as JsonNode | null;
-      if (!dataNode) {
-        this._items = [];
-        return;
+    const data = yield* context.graphqlQuery(
+      "45246d3fe16ccc6577e0bd297a5db1ab",
+      {
+        reel_ids: [],
+        tag_names: [],
+        location_ids: [],
+        highlight_reel_ids: [String(highlightUniqueId(highlight))],
+        precomposed_overlay: false,
       }
-      const reelsMedia = dataNode["reels_media"] as JsonNode[] | null;
-      if (!reelsMedia || reelsMedia.length === 0) {
-        this._items = [];
-        return;
-      }
-      const firstReel = reelsMedia[0] as JsonNode;
-      this._items = (firstReel["items"] as JsonNode[]) ?? [];
+    );
+    const dataNode = data["data"] as JsonNode | null;
+    if (!dataNode) {
+      return { ...highlight, items: [] };
     }
-  }
-
-  protected override async _fetchIphoneStruct(): Promise<void> {
-    if (
-      this._context.iphoneSupport &&
-      this._context.isLoggedIn &&
-      !this._iphoneStruct_
-    ) {
-      const data = await this._context.getIphoneJson(
-        `api/v1/feed/reels_media/?reel_ids=highlight:${this.uniqueId}`,
-        {},
-      );
-      const reels = data["reels"] as JsonNode;
-      this._iphoneStruct_ = reels[`highlight:${this.uniqueId}`] as JsonNode;
+    const reelsMedia = dataNode["reels_media"] as JsonNode[] | null;
+    if (!reelsMedia || reelsMedia.length === 0) {
+      return { ...highlight, items: [] };
     }
-  }
+    const firstReel = reelsMedia[0] as JsonNode;
+    const items = (firstReel["items"] as JsonNode[]) ?? [];
+    return { ...highlight, items };
+  });
 
-  override get itemcount(): number {
-    if (!this._items) {
-      throw new Error("Items not fetched. Call getItemcount() instead.");
+export const highlightFetchIphoneStruct = (
+  context: InstaloaderContextShape,
+  highlight: HighlightData
+): Effect.Effect<HighlightData, HighlightError> =>
+  Effect.gen(function* () {
+    const loggedIn = yield* context.isLoggedIn;
+    if (!context.options.iphoneSupport || !loggedIn) {
+      return highlight;
     }
-    return this._items.length;
-  }
+    if (highlight.iphoneStruct) {
+      return highlight;
+    }
+    const uniqueId = highlightUniqueId(highlight);
+    const data = yield* context.getIphoneJson(
+      `api/v1/feed/reels_media/?reel_ids=highlight:${uniqueId}`,
+      {}
+    );
+    const reels = data["reels"] as JsonNode;
+    const iphoneStruct = reels[`highlight:${uniqueId}`] as JsonNode;
+    return { ...highlight, iphoneStruct };
+  });
 
-  async getItemcount(): Promise<number> {
-    await this._fetchItems();
-    return this._items!.length;
-  }
+export const highlightGetItemcount = (
+  context: InstaloaderContextShape,
+  highlight: HighlightData
+): Effect.Effect<number, HighlightError> =>
+  Effect.gen(function* () {
+    const updated = yield* highlightFetchItems(context, highlight);
+    return updated.items!.length;
+  });
 
-  override async *getItems(): AsyncGenerator<StoryItem> {
-    await this._fetchItems();
-    await this._fetchIphoneStruct();
+export const highlightGetItems = (
+  context: InstaloaderContextShape,
+  highlight: HighlightData
+): Effect.Effect<StoryItemData[], HighlightError> =>
+  Effect.gen(function* () {
+    const withItems = yield* highlightFetchItems(context, highlight);
+    const withIphone = yield* highlightFetchIphoneStruct(context, withItems);
 
-    for (const item of this._items!) {
-      if (this._iphoneStruct_) {
-        const iphoneItems = this._iphoneStruct_["items"] as JsonNode[];
+    const result: StoryItemData[] = [];
+    for (const item of withIphone.items!) {
+      let itemWithIphone = item;
+      if (withIphone.iphoneStruct) {
+        const iphoneItems = withIphone.iphoneStruct["items"] as JsonNode[];
         for (const iphoneItem of iphoneItems) {
           if (Number(iphoneItem["pk"]) === Number(item["id"])) {
-            item["iphone_struct"] = iphoneItem;
+            itemWithIphone = { ...item, iphone_struct: iphoneItem };
             break;
           }
         }
       }
-
-      yield new StoryItem(this._context, item, this.ownerProfile);
+      result.push(storyItemFromNode(itemWithIphone, highlightOwnerProfile(withIphone)));
     }
-  }
-}
+    return result;
+  });

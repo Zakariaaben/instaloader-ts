@@ -1,13 +1,29 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { Effect, Stream, pipe, Option } from "effect";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-  Instaloader,
-  InstaloaderContext,
-  Profile,
-  Hashtag,
-  Post,
+  makeInstaloaderContext,
+  profileFromUsername,
+  profileFromId,
+  profileUserid,
+  profileUsername,
+  profileGetPostsStream,
+  profileGetTaggedPostsStream,
+  profileGetIgtvPostsStream,
+  postFromMediaidEffect,
+  postShortcode,
+  postMediaid,
+  postDateUtc,
+  postToString,
+  hashtagFromNameEffect,
+  hashtagGetPostsStream,
+  postFromNodeSync,
+  type InstaloaderContextShape,
+  type JsonNode,
+  type PostData,
+  type ProfileData,
 } from "../src/index.ts";
 
 const PUBLIC_PROFILE = "selenagomez";
@@ -18,141 +34,195 @@ const PRIVATE_PROFILE = "aandergr";
 const PRIVATE_PROFILE_ID = 1706625676;
 const EMPTY_PROFILE = "not_public";
 const EMPTY_PROFILE_ID = 1928659031;
-const NORMAL_MAX_COUNT = 2;
 const PAGING_MAX_COUNT = 15;
 
 describe("Instaloader Anonymous Tests", () => {
-  let L: Instaloader;
+  let ctx: InstaloaderContextShape;
   let testDir: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), "instaloader-test-"));
     console.log(`Testing in ${testDir}`);
     process.chdir(testDir);
-    L = new Instaloader({
-      downloadGeotags: true,
-      downloadComments: true,
-      saveMetadata: true,
-    });
-    L.context.raiseAllErrors = true;
+    
+    ctx = await Effect.runPromise(makeInstaloaderContext({
+      quiet: false,
+      sleep: true,
+    }));
   });
 
-  afterAll(() => {
-    L.close();
+  afterAll(async () => {
+    await Effect.runPromise(ctx.close);
     process.chdir("/");
     console.log(`Removing ${testDir}`);
     fs.rmSync(testDir, { recursive: true, force: true });
   });
 
-  async function postPagingTest(
-    iterator: AsyncIterable<Post>,
-    maxCount: number = PAGING_MAX_COUNT,
-  ): Promise<void> {
-    let previousPost: Post | null = null;
-    let count = 0;
-    for await (const post of iterator) {
-      console.log(post.toString());
+  function postPagingTest(posts: PostData[]): void {
+    let previousPost: PostData | null = null;
+    for (const post of posts) {
+      console.log(postToString(post));
       if (previousPost) {
-        expect(post.dateUtc.getTime()).toBeLessThan(
-          previousPost.dateUtc.getTime(),
-        );
+        const currentDate = Option.getOrThrow(postDateUtc(post));
+        const previousDate = Option.getOrThrow(postDateUtc(previousPost));
+        expect(currentDate.getTime()).toBeLessThan(previousDate.getTime());
       }
       previousPost = post;
-      count++;
-      if (count >= maxCount) break;
     }
   }
 
   test("get id by username", async () => {
-    const profile = await Profile.fromUsername(L.context, PUBLIC_PROFILE);
-    expect(profile.userid).toBe(PUBLIC_PROFILE_ID);
+    const profile = await Effect.runPromise(profileFromUsername(ctx, PUBLIC_PROFILE));
+    expect(profileUserid(profile)).toBe(PUBLIC_PROFILE_ID);
   });
 
   test("get username by id (private)", async () => {
-    const profile = await Profile.fromId(L.context, PRIVATE_PROFILE_ID);
-    expect(profile.username).toBe(PRIVATE_PROFILE.toLowerCase());
+    const profile = await Effect.runPromise(profileFromId(ctx, PRIVATE_PROFILE_ID));
+    expect(profileUsername(profile)).toBe(PRIVATE_PROFILE.toLowerCase());
   });
 
   test("get username by id (public)", async () => {
-    const profile = await Profile.fromId(L.context, PUBLIC_PROFILE_ID);
-    expect(profile.username).toBe(PUBLIC_PROFILE.toLowerCase());
+    const profile = await Effect.runPromise(profileFromId(ctx, PUBLIC_PROFILE_ID));
+    expect(profileUsername(profile)).toBe(PUBLIC_PROFILE.toLowerCase());
   });
 
   test("get username by id (empty)", async () => {
-    const profile = await Profile.fromId(L.context, EMPTY_PROFILE_ID);
-    expect(profile.username).toBe(EMPTY_PROFILE.toLowerCase());
+    const profile = await Effect.runPromise(profileFromId(ctx, EMPTY_PROFILE_ID));
+    expect(profileUsername(profile)).toBe(EMPTY_PROFILE.toLowerCase());
   });
 
   test("get username by name (empty)", async () => {
-    const profile = await Profile.fromUsername(L.context, EMPTY_PROFILE);
-    expect(profile.userid).toBe(EMPTY_PROFILE_ID);
+    const profile = await Effect.runPromise(profileFromUsername(ctx, EMPTY_PROFILE));
+    expect(profileUserid(profile)).toBe(EMPTY_PROFILE_ID);
   });
 
   test("public profile paging", async () => {
-    const profile = await Profile.fromUsername(L.context, PUBLIC_PROFILE);
-    await postPagingTest(profile.getPosts());
+    const profile = await Effect.runPromise(profileFromUsername(ctx, PUBLIC_PROFILE));
+    
+    const postsStream = await Effect.runPromise(
+      profileGetPostsStream(
+        ctx,
+        profile,
+        (node: JsonNode, _profile: ProfileData) => postFromNodeSync(node)
+      )
+    );
+    
+    const posts = await Effect.runPromise(
+      pipe(
+        postsStream,
+        Stream.take(PAGING_MAX_COUNT),
+        Stream.runCollect,
+        Effect.map((chunk) => [...chunk])
+      )
+    );
+    
+    postPagingTest(posts);
   });
 
   test("post from mediaid", async () => {
-    const profile = await Profile.fromUsername(L.context, PUBLIC_PROFILE);
-    for await (const post of profile.getPosts()) {
-      const post2 = await Post.fromMediaid(L.context, post.mediaid);
-      expect(post.shortcode).toBe(post2.shortcode);
-      break;
+    const profile = await Effect.runPromise(profileFromUsername(ctx, PUBLIC_PROFILE));
+    
+    const postsStream = await Effect.runPromise(
+      profileGetPostsStream(
+        ctx,
+        profile,
+        (node: JsonNode, _profile: ProfileData) => postFromNodeSync(node)
+      )
+    );
+    
+    const posts = await Effect.runPromise(
+      pipe(
+        postsStream,
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.map((chunk) => [...chunk])
+      )
+    );
+    
+    const post = posts[0];
+    if (post) {
+      const postData: PostData = await Effect.runPromise(
+        postFromMediaidEffect(ctx, postMediaid(post))
+      );
+      expect(postShortcode(post)).toBe(postShortcode(postData));
     }
   });
 
   test("public profile tagged paging", async () => {
-    const profile = await Profile.fromUsername(L.context, PUBLIC_PROFILE);
+    const profile = await Effect.runPromise(profileFromUsername(ctx, PUBLIC_PROFILE));
+    
+    const taggedStream = profileGetTaggedPostsStream(
+      ctx,
+      profile,
+        (node: JsonNode, _ownerProfile: ProfileData | null) => postFromNodeSync(node)
+    );
+    
+    const posts = await Effect.runPromise(
+      pipe(
+        taggedStream,
+        Stream.take(PAGING_MAX_COUNT),
+        Stream.runCollect,
+        Effect.map((chunk) => [...chunk])
+      )
+    );
+    
     let count = 0;
-    for await (const post of profile.getTaggedPosts()) {
-      console.log(post.toString());
+    for (const post of posts) {
+      console.log(postToString(post));
       count++;
       if (count >= PAGING_MAX_COUNT) break;
     }
   });
 
   test("public profile igtv", async () => {
-    const profile = await Profile.fromUsername(
-      L.context,
-      PUBLIC_PROFILE_WITH_IGTV,
+    const profile = await Effect.runPromise(
+      profileFromUsername(ctx, PUBLIC_PROFILE_WITH_IGTV)
     );
+    
+    const igtvStream = profileGetIgtvPostsStream(
+      ctx,
+      profile,
+        (node: JsonNode, _ownerProfile: ProfileData | null) => postFromNodeSync(node)
+    );
+    
+    const posts = await Effect.runPromise(
+      pipe(
+        igtvStream,
+        Stream.take(PAGING_MAX_COUNT),
+        Stream.runCollect,
+        Effect.map((chunk) => [...chunk])
+      )
+    );
+    
     let count = 0;
-    for await (const post of profile.getIgtvPosts()) {
-      console.log(post.toString());
+    for (const post of posts) {
+      console.log(postToString(post));
       count++;
       if (count >= PAGING_MAX_COUNT) break;
     }
   });
 
   test("hashtag paging", async () => {
-    const hashtag = await Hashtag.fromName(L.context, HASHTAG);
+    const hashtag = await Effect.runPromise(hashtagFromNameEffect(ctx, HASHTAG));
+    
+    const postsStream = await Effect.runPromise(
+      hashtagGetPostsStream(ctx, hashtag)
+    );
+    
+    const postDataList = await Effect.runPromise(
+      pipe(
+        postsStream,
+        Stream.take(PAGING_MAX_COUNT),
+        Stream.runCollect,
+        Effect.map((chunk) => [...chunk])
+      )
+    );
+    
     let count = 0;
-    for await (const post of hashtag.getPosts()) {
-      console.log(post.toString());
+    for (const postData of postDataList) {
+      console.log(`Post: ${postShortcode(postData)}`);
       count++;
       if (count >= PAGING_MAX_COUNT) break;
     }
-  });
-
-  test.skip("hashtag download", async () => {
-    await L.downloadHashtag(HASHTAG, { maxCount: NORMAL_MAX_COUNT });
-  });
-
-  test.skip("profile pic download", async () => {
-    const profile = await Profile.fromUsername(L.context, PUBLIC_PROFILE);
-    await L.downloadProfile(profile, { posts: false });
-  });
-
-  test.skip("public profile download", async () => {
-    const profile = await Profile.fromUsername(L.context, PUBLIC_PROFILE);
-    await L.downloadProfile(profile, {
-      profilePic: false,
-      fastUpdate: true,
-    });
-    await L.downloadProfile(profile, {
-      profilePic: false,
-      fastUpdate: true,
-    });
   });
 });

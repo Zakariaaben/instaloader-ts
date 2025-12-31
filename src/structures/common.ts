@@ -1,5 +1,3 @@
-import type { InstaloaderContext } from "../core/context.ts";
-
 export interface PostSidecarNode {
   isVideo: boolean;
   displayUrl: string;
@@ -23,8 +21,8 @@ export interface PostCommentAnswer {
   likesCount: number;
 }
 
-export function optionalNormalize(str: string | null): string | null {
-  if (str !== null) {
+export function optionalNormalize(str: string | null | undefined): string | null {
+  if (str != null && typeof str === "string") {
     return str.normalize("NFC");
   }
   return null;
@@ -41,5 +39,3 @@ export interface Profile {
   readonly username: string;
   _asdict(): JsonNode;
 }
-
-export type { InstaloaderContext };

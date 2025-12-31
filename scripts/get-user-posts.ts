@@ -1,17 +1,46 @@
 #!/usr/bin/env bun
-import { Instaloader, Profile, getDefaultSessionFilename } from "../src/index.ts";
-import * as fs from "fs";
+import { Effect, Stream, pipe, Option } from "effect";
+import { FileSystem } from "@effect/platform";
+import {
+  makeInstaloaderContext,
+  getDefaultSessionFilename,
+  loadSessionFromFileEffect,
+  PlatformLayer,
+  profileFromUsername,
+  profileUsername,
+  profileFollowees,
+  profileFollowers,
+  profileMediacount,
+  profileIsPrivate,
+  profileIsVerified,
+  profileGetPostsStream,
+  postFromNodeSync,
+  postShortcode,
+  postDateUtc,
+  postTypename,
+  postLikes,
+  postComments,
+  postCaption,
+  type PostData,
+  type ProfileData,
+  type JsonNode,
+} from "../src/index.ts";
 
 const USERNAME = "rifka.bjm";
-const MAX_POSTS = 10;
+const MAX_POSTS = 20;
 
 async function main() {
-  const loader = new Instaloader({ quiet: false });
+  const program = Effect.gen(function* () {
+    const fsService = yield* FileSystem.FileSystem;
+    const ctx = yield* makeInstaloaderContext({ quiet: false });
 
-  try {
     const sessionFile = getDefaultSessionFilename("zakaria_._ben");
-    if (fs.existsSync(sessionFile)) {
-      await loader.loadSessionFromFile("zakaria_._ben");
+    const sessionExists = yield* fsService.exists(sessionFile);
+    if (sessionExists) {
+      yield* pipe(
+        loadSessionFromFileEffect(ctx, "zakaria_._ben"),
+        Effect.provide(PlatformLayer)
+      );
       console.log("Session loaded\n");
     } else {
       console.log("No session file found, running anonymously\n");
@@ -19,26 +48,47 @@ async function main() {
 
     console.log(`Fetching posts from @${USERNAME}...\n`);
 
-    const profile = await Profile.fromUsername(loader.context, USERNAME);
-    
-    console.log(`Profile: ${profile.username}`);
-    console.log(`Full name: ${await profile.getFullName()}`);
-    console.log(`Followers: ${await profile.getFollowers()}`);
-    console.log(`Following: ${await profile.getFollowees()}`);
-    console.log(`Posts: ${await profile.getMediacount()}`);
-    console.log(`Private: ${await profile.getIsPrivate()}`);
-    console.log(`Verified: ${await profile.getIsVerified()}`);
+    const profile = yield* profileFromUsername(ctx, USERNAME);
+
+    const username = profileUsername(profile);
+    const followeesOpt = profileFollowees(profile);
+    const followersOpt = profileFollowers(profile);
+    const mediacountOpt = profileMediacount(profile);
+    const isPrivateOpt = profileIsPrivate(profile);
+    const isVerifiedOpt = profileIsVerified(profile);
+
+    console.log(`Profile: ${username}`);
+    console.log(`Followers: ${Option.isSome(followersOpt) ? followersOpt.value : "N/A"}`);
+    console.log(`Following: ${Option.isSome(followeesOpt) ? followeesOpt.value : "N/A"}`);
+    console.log(`Posts: ${Option.isSome(mediacountOpt) ? mediacountOpt.value : "N/A"}`);
+    console.log(`Private: ${Option.isSome(isPrivateOpt) ? isPrivateOpt.value : "N/A"}`);
+    console.log(`Verified: ${Option.isSome(isVerifiedOpt) ? isVerifiedOpt.value : "N/A"}`);
     console.log("");
 
+    const postsStream = yield* profileGetPostsStream(
+      ctx,
+      profile,
+      (node: JsonNode, _profileData: ProfileData) => postFromNodeSync(node)
+    );
+
+    const posts = yield* pipe(
+      postsStream,
+      Stream.take(MAX_POSTS),
+      Stream.runCollect,
+      Effect.map((chunk) => [...chunk])
+    );
+
     let count = 0;
-    for await (const post of profile.getPosts()) {
-      console.log(`[${count + 1}] ${post.shortcode}`);
-      console.log(`    Date: ${post.dateUtc.toISOString()}`);
-      console.log(`    Type: ${post.typename}`);
-      console.log(`    Likes: ${post.likes}`);
-      console.log(`    Comments: ${post.comments}`);
-      
-      const caption = post.caption;
+    for (const post of posts) {
+      console.log(`[${count + 1}] ${postShortcode(post)}`);
+      const dateUtcOpt = postDateUtc(post);
+      const dateStr = Option.isSome(dateUtcOpt) ? dateUtcOpt.value.toISOString() : "N/A";
+      console.log(`    Date: ${dateStr}`);
+      console.log(`    Type: ${postTypename(post)}`);
+      console.log(`    Likes: ${postLikes(post)}`);
+      console.log(`    Comments: ${postComments(post)}`);
+
+      const caption = postCaption(post);
       if (caption) {
         const shortCaption = caption.length > 80 ? caption.slice(0, 80) + "..." : caption;
         console.log(`    Caption: ${shortCaption.replace(/\n/g, " ")}`);
@@ -46,18 +96,18 @@ async function main() {
       console.log("");
 
       count++;
-      if (count >= MAX_POSTS) {
-        console.log(`Reached ${MAX_POSTS} posts limit.`);
-        break;
-      }
     }
 
     console.log(`\nFetched ${count} posts from @${USERNAME}`);
+
+    yield* ctx.close;
+  });
+
+  try {
+    await Effect.runPromise(program.pipe(Effect.provide(PlatformLayer)));
   } catch (err) {
     console.error("Error:", err instanceof Error ? err.message : err);
     process.exit(1);
-  } finally {
-    loader.close();
   }
 }
 
