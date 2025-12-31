@@ -1,15 +1,23 @@
-import { Effect, Option as EffectOption } from "effect";
+import { Effect, Option as EffectOption, Stream } from "effect";
 import type { Result } from "./result";
 import { Ok, Err } from "./result";
 import type { Option } from "./option";
 import { Some, None } from "./option";
 import type { TypedAsyncIterable } from "./async-iterable";
-import { fromStream, fromStreamEffect } from "./async-iterable";
+import { fromStream, fromStreamEffect, fromAsyncGenerator } from "./async-iterable";
 import type {
   InstaloaderOptions,
   Profile,
   Post,
   PostError,
+  SessionData,
+  StoryItem,
+  Story,
+  Highlight,
+  Hashtag,
+  PostLocation,
+  SidecarNode,
+  ProfileFetchError,
 } from "./types";
 import type {
   ProfileError,
@@ -22,14 +30,16 @@ import {
   makeInstaloaderContext,
   type InstaloaderContextShape,
 } from "../core/context";
-import {
-  loadSessionFromFileEffect,
-  saveSessionToFileEffect,
-  getDefaultSessionFilename,
-  PlatformLayer,
-} from "../core/instaloader";
 import * as ProfileEffect from "../structures/profile";
 import * as PostEffect from "../structures/post";
+import * as StoryEffect from "../structures/story";
+import * as HighlightEffect from "../structures/highlight";
+import * as HashtagEffect from "../structures/hashtag";
+import {
+  getStoriesEffect,
+  getHighlightsEffect,
+  getFeedPostsEffect,
+} from "../core/instaloader";
 import type { JsonNode } from "../structures/common";
 
 type CreateProfileError = ProfileNotExistsError | ConnectionErr | ProfileError;
@@ -38,7 +48,74 @@ function convertEffectOption<A>(effectOption: EffectOption.Option<A>): Option<A>
   return EffectOption.isSome(effectOption) ? Some(effectOption.value) : None;
 }
 
-function createPostWrapper(postData: PostEffect.PostData): Post {
+function createStoryItemWrapper(item: StoryEffect.StoryItemData): StoryItem {
+  return {
+    mediaid: StoryEffect.storyItemMediaid(item),
+    shortcode: StoryEffect.storyItemShortcode(item),
+    typename: StoryEffect.storyItemTypename(item),
+    url: StoryEffect.storyItemUrl(item),
+    isVideo: StoryEffect.storyItemIsVideo(item),
+    videoUrl: StoryEffect.storyItemVideoUrl(item),
+    dateUtc: StoryEffect.storyItemDateUtc(item),
+    dateLocal: StoryEffect.storyItemDateLocal(item),
+    expiringUtc: StoryEffect.storyItemExpiringUtc(item),
+    caption: StoryEffect.storyItemCaption(item),
+    captionHashtags: StoryEffect.storyItemCaptionHashtags(item),
+    captionMentions: StoryEffect.storyItemCaptionMentions(item),
+    ownerUsername: convertEffectOption(StoryEffect.storyItemOwnerUsername(item)),
+    ownerId: convertEffectOption(StoryEffect.storyItemOwnerId(item)),
+  };
+}
+
+function createStoryWrapper(
+  context: InstaloaderContextShape,
+  storyData: StoryEffect.StoryData
+): Story {
+  return {
+    ownerUsername: StoryEffect.storyOwnerUsername(storyData),
+    ownerId: StoryEffect.storyOwnerId(storyData),
+    lastSeenUtc: StoryEffect.storyLastSeenUtc(storyData),
+    latestMediaUtc: StoryEffect.storyLatestMediaUtc(storyData),
+    itemcount: StoryEffect.storyItemcount(storyData),
+    async getItems(): Promise<Result<PostError, StoryItem[]>> {
+      const result = await Effect.runPromise(
+        Effect.either(StoryEffect.storyGetItems(context, storyData))
+      );
+      if (result._tag === "Left") {
+        return Err(result.left as PostError);
+      }
+      return Ok(result.right.map(createStoryItemWrapper));
+    },
+  };
+}
+
+function createHighlightWrapper(
+  context: InstaloaderContextShape,
+  highlightData: HighlightEffect.HighlightData
+): Highlight {
+  return {
+    uniqueId: HighlightEffect.highlightUniqueId(highlightData),
+    title: HighlightEffect.highlightTitle(highlightData),
+    coverUrl: HighlightEffect.highlightCoverUrl(highlightData),
+    coverCroppedUrl: HighlightEffect.highlightCoverCroppedUrl(highlightData),
+    ownerUsername: HighlightEffect.highlightOwnerUsername(highlightData),
+    ownerId: HighlightEffect.highlightOwnerId(highlightData),
+    async getItems(): Promise<Result<PostError, StoryItem[]>> {
+      const result = await Effect.runPromise(
+        Effect.either(HighlightEffect.highlightGetItems(context, highlightData))
+      );
+      if (result._tag === "Left") {
+        return Err(result.left as PostError);
+      }
+      return Ok(result.right.map(createStoryItemWrapper));
+    },
+  };
+}
+
+function createPostWrapper(
+  context: InstaloaderContextShape,
+  postData: PostEffect.PostData
+): Post {
   return {
     shortcode: PostEffect.shortcode(postData),
     mediaid: PostEffect.mediaid(postData),
@@ -63,6 +140,50 @@ function createPostWrapper(postData: PostEffect.PostData): Post {
     isPinned: PostEffect.isPinned(postData),
     ownerUsername: convertEffectOption(PostEffect.ownerUsername(postData)),
     ownerId: convertEffectOption(PostEffect.ownerId(postData)),
+
+    async getSidecarNodes(start = 0, end = -1): Promise<Result<PostError, SidecarNode[]>> {
+      const result = await Effect.runPromise(
+        Effect.either(PostEffect.getSidecarNodes(context, postData, start, end))
+      );
+      if (result._tag === "Left") {
+        return Err(result.left as PostError);
+      }
+      return Ok(result.right.map((node) => ({
+        displayUrl: node.displayUrl,
+        isVideo: node.isVideo,
+        videoUrl: node.videoUrl,
+      })));
+    },
+
+    async getVideoUrl(): Promise<Result<PostError, string | null>> {
+      const result = await Effect.runPromise(
+        Effect.either(PostEffect.getVideoUrl(context, postData))
+      );
+      if (result._tag === "Left") {
+        return Err(result.left as PostError);
+      }
+      return Ok(result.right);
+    },
+
+    async getLocation(): Promise<Result<PostError | LoginRequiredError, PostLocation | null>> {
+      const result = await Effect.runPromise(
+        Effect.either(PostEffect.getLocation(context, postData))
+      );
+      if (result._tag === "Left") {
+        return Err(result.left as PostError | LoginRequiredError);
+      }
+      return Ok(result.right);
+    },
+
+    async getOwnerProfile(): Promise<Result<PostError, Profile>> {
+      const result = await Effect.runPromise(
+        Effect.either(PostEffect.getOwnerProfile(context, postData))
+      );
+      if (result._tag === "Left") {
+        return Err(result.left as PostError);
+      }
+      return Ok(createProfileWrapper(context, result.right));
+    },
   };
 }
 
@@ -70,7 +191,7 @@ function createProfileWrapper(
   context: InstaloaderContextShape,
   profileData: ProfileEffect.ProfileData
 ): Profile {
-  const profile: Profile = {
+  return {
     userid: ProfileEffect.userid(profileData),
     username: ProfileEffect.username(profileData),
     fullName: convertEffectOption(ProfileEffect.fullName(profileData)),
@@ -97,7 +218,7 @@ function createProfileWrapper(
       const streamEffect = ProfileEffect.getPostsStream(
         context,
         profileData,
-        (node: JsonNode, prof: ProfileEffect.ProfileData) => createPostWrapper(PostEffect.fromNodeSync(node, prof))
+        (node: JsonNode, prof: ProfileEffect.ProfileData) => createPostWrapper(context, PostEffect.fromNodeSync(node, prof))
       );
       return fromStreamEffect(streamEffect) as TypedAsyncIterable<PostError, Post>;
     },
@@ -107,7 +228,7 @@ function createProfileWrapper(
         context,
         profileData,
         (node: JsonNode, ownerProf: ProfileEffect.ProfileData | null) => 
-          createPostWrapper(PostEffect.fromNodeSync(node, ownerProf ?? undefined))
+          createPostWrapper(context, PostEffect.fromNodeSync(node, ownerProf ?? undefined))
       );
       return fromStream(stream) as TypedAsyncIterable<PostError, Post>;
     },
@@ -116,7 +237,7 @@ function createProfileWrapper(
       const stream = ProfileEffect.getReelsStream(
         context,
         profileData,
-        (node: JsonNode) => createPostWrapper(PostEffect.fromNodeSync(node))
+        (node: JsonNode) => createPostWrapper(context, PostEffect.fromNodeSync(node))
       );
       return fromStream(stream) as TypedAsyncIterable<PostError, Post>;
     },
@@ -125,7 +246,7 @@ function createProfileWrapper(
       const stream = ProfileEffect.getIgtvPostsStream(
         context,
         profileData,
-        (node: JsonNode, prof: ProfileEffect.ProfileData) => createPostWrapper(PostEffect.fromNodeSync(node, prof))
+        (node: JsonNode, prof: ProfileEffect.ProfileData) => createPostWrapper(context, PostEffect.fromNodeSync(node, prof))
       );
       return fromStream(stream) as TypedAsyncIterable<PostError, Post>;
     },
@@ -136,7 +257,7 @@ function createProfileWrapper(
           ProfileEffect.getSavedPostsStream(
             context,
             profileData,
-            (node: JsonNode) => createPostWrapper(PostEffect.fromNodeSync(node))
+            (node: JsonNode) => createPostWrapper(context, PostEffect.fromNodeSync(node))
           )
         )
       );
@@ -147,9 +268,102 @@ function createProfileWrapper(
 
       return Ok(fromStream(result.right) as TypedAsyncIterable<PostError, Post>);
     },
-  };
 
-  return profile;
+    async getProfilePicUrl(): Promise<Result<ProfileFetchError, string>> {
+      const result = await Effect.runPromise(
+        Effect.either(ProfileEffect.getProfilePicUrl(context, profileData))
+      );
+      if (result._tag === "Left") {
+        return Err(result.left as ProfileFetchError);
+      }
+      return Ok(result.right);
+    },
+
+    async getHasPublicStory(): Promise<Result<ProfileFetchError, boolean>> {
+      const result = await Effect.runPromise(
+        Effect.either(ProfileEffect.getHasPublicStory(context, profileData))
+      );
+      if (result._tag === "Left") {
+        return Err(result.left as ProfileFetchError);
+      }
+      return Ok(result.right);
+    },
+  };
+}
+
+function createHashtagWrapper(
+  context: InstaloaderContextShape,
+  hashtagData: HashtagEffect.HashtagData
+): Hashtag {
+  return {
+    name: HashtagEffect.hashtagName(hashtagData),
+
+    async getMediacount(): Promise<Result<PostError, number>> {
+      const result = await Effect.runPromise(
+        Effect.either(HashtagEffect.hashtagGetMediacount(context, hashtagData))
+      );
+      if (result._tag === "Left") {
+        return Err(result.left as PostError);
+      }
+      return Ok(result.right);
+    },
+
+    async getProfilePicUrl(): Promise<Result<PostError, string>> {
+      const result = await Effect.runPromise(
+        Effect.either(HashtagEffect.hashtagGetProfilePicUrl(context, hashtagData))
+      );
+      if (result._tag === "Left") {
+        return Err(result.left as PostError);
+      }
+      return Ok(result.right);
+    },
+
+    getPosts(): TypedAsyncIterable<PostError, Post> {
+      async function* generator(): AsyncGenerator<Result<PostError, Post>, void, undefined> {
+        const streamResult = await Effect.runPromise(
+          Effect.either(HashtagEffect.hashtagGetPostsStream(context, hashtagData))
+        );
+        if (streamResult._tag === "Left") {
+          yield Err(streamResult.left as PostError);
+          return;
+        }
+        const collectResult = await Effect.runPromise(
+          Effect.either(Stream.runCollect(streamResult.right))
+        );
+        if (collectResult._tag === "Left") {
+          yield Err(collectResult.left as PostError);
+          return;
+        }
+        for (const postData of collectResult.right) {
+          yield Ok(createPostWrapper(context, postData));
+        }
+      }
+      return fromAsyncGenerator(generator);
+    },
+
+    getTopPosts(): TypedAsyncIterable<PostError, Post> {
+      async function* generator(): AsyncGenerator<Result<PostError, Post>, void, undefined> {
+        const streamResult = await Effect.runPromise(
+          Effect.either(HashtagEffect.hashtagGetTopPostsStream(context, hashtagData))
+        );
+        if (streamResult._tag === "Left") {
+          yield Err(streamResult.left as PostError);
+          return;
+        }
+        const collectResult = await Effect.runPromise(
+          Effect.either(Stream.runCollect(streamResult.right))
+        );
+        if (collectResult._tag === "Left") {
+          yield Err(collectResult.left as PostError);
+          return;
+        }
+        for (const postData of collectResult.right) {
+          yield Ok(createPostWrapper(context, postData));
+        }
+      }
+      return fromAsyncGenerator(generator);
+    },
+  };
 }
 
 export class Instaloader {
@@ -217,7 +431,19 @@ export class Instaloader {
       return Err(result.left as PostError);
     }
 
-    return Ok(createPostWrapper(result.right));
+    return Ok(createPostWrapper(this.ctx, result.right));
+  }
+
+  async getPostByMediaId(mediaid: number): Promise<Result<PostError, Post>> {
+    const result = await Effect.runPromise(
+      Effect.either(PostEffect.fromMediaidEffect(this.ctx, mediaid))
+    );
+
+    if (result._tag === "Left") {
+      return Err(result.left as PostError);
+    }
+
+    return Ok(createPostWrapper(this.ctx, result.right));
   }
 
   async getOwnProfile(): Promise<Result<CreateProfileError | LoginRequiredError, Profile>> {
@@ -232,34 +458,76 @@ export class Instaloader {
     return Ok(createProfileWrapper(this.ctx, result.right));
   }
 
+  async getStories(userids?: number[]): Promise<Result<LoginRequiredError | PostError, Story[]>> {
+    const result = await Effect.runPromise(
+      Effect.either(getStoriesEffect(this.ctx, userids))
+    );
+
+    if (result._tag === "Left") {
+      return Err(result.left as LoginRequiredError | PostError);
+    }
+
+    return Ok(result.right.map((storyData) => createStoryWrapper(this.ctx, storyData)));
+  }
+
+  async getHighlights(
+    user: number | Profile
+  ): Promise<Result<LoginRequiredError | PostError, Highlight[]>> {
+    const userId = typeof user === "number" ? user : user.userid;
+    const result = await Effect.runPromise(
+      Effect.either(getHighlightsEffect(this.ctx, userId))
+    );
+
+    if (result._tag === "Left") {
+      return Err(result.left as LoginRequiredError | PostError);
+    }
+
+    return Ok(result.right.map((highlightData) => createHighlightWrapper(this.ctx, highlightData)));
+  }
+
+  getFeedPosts(): Promise<Result<LoginRequiredError, TypedAsyncIterable<PostError, Post>>> {
+    return Effect.runPromise(
+      Effect.either(getFeedPostsEffect(this.ctx))
+    ).then((result) => {
+      if (result._tag === "Left") {
+        return Err(result.left as LoginRequiredError);
+      }
+      const mappedStream = Stream.map(result.right, (postData) =>
+        createPostWrapper(this.ctx, postData)
+      );
+      return Ok(fromStream(mappedStream) as TypedAsyncIterable<PostError, Post>);
+    });
+  }
+
+  async getHashtag(name: string): Promise<Result<PostError, Hashtag>> {
+    const result = await Effect.runPromise(
+      Effect.either(HashtagEffect.fromNameEffect(this.ctx, name))
+    );
+
+    if (result._tag === "Left") {
+      return Err(result.left as PostError);
+    }
+
+    return Ok(createHashtagWrapper(this.ctx, result.right));
+  }
+
   get context(): InstaloaderContextShape {
     return this.ctx;
   }
 
-  async loadSession(username: string, filename?: string): Promise<Result<Error, void>> {
-    const effect = loadSessionFromFileEffect(this.ctx, username, filename);
-    const result = await Effect.runPromise(
-      Effect.either(Effect.provide(effect, PlatformLayer))
-    );
-    if (result._tag === "Left") {
-      return Err(result.left as Error);
-    }
-    return Ok(result.right);
+  async loadSessionData(username: string, sessionData: SessionData): Promise<Result<never, void>> {
+    await Effect.runPromise(this.ctx.loadSession(username, sessionData));
+    return Ok(undefined);
   }
 
-  async saveSession(filename?: string): Promise<Result<LoginRequiredError | Error, void>> {
-    const effect = saveSessionToFileEffect(this.ctx, filename);
-    const result = await Effect.runPromise(
-      Effect.either(Effect.provide(effect, PlatformLayer))
-    );
-    if (result._tag === "Left") {
-      return Err(result.left as LoginRequiredError | Error);
+  async getSessionData(): Promise<Result<LoginRequiredError, SessionData>> {
+    const isLoggedIn = await Effect.runPromise(this.ctx.isLoggedIn);
+    if (!isLoggedIn) {
+      const { LoginRequiredError } = await import("../errors");
+      return Err(new LoginRequiredError("Login required to get session data"));
     }
-    return Ok(result.right);
-  }
-
-  getDefaultSessionFilename(username: string): string {
-    return getDefaultSessionFilename(username);
+    const sessionData = await Effect.runPromise(this.ctx.saveSession);
+    return Ok(sessionData);
   }
 
   private async runEffect<E, A>(effect: Effect.Effect<A, E>): Promise<Result<E, A>> {

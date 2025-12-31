@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { Effect, Stream, pipe, Option } from "effect";
-import { FileSystem } from "@effect/platform";
 import {
   makeInstaloaderContext,
-  getDefaultSessionFilename,
-  loadSessionFromFileEffect,
-  PlatformLayer,
   profileFromUsername,
   profileUsername,
   profileFollowees,
@@ -21,26 +20,36 @@ import {
   postLikes,
   postComments,
   postCaption,
-  type PostData,
   type ProfileData,
   type JsonNode,
+  type CookieJar,
 } from "../src/index.ts";
 
 const USERNAME = "rifka.bjm";
 const MAX_POSTS = 20;
 
+function getSessionPath(username: string): string {
+  const configDir = process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config");
+  return join(configDir, "instaloader", `session-${username}`);
+}
+
+async function loadSessionFromFile(username: string): Promise<CookieJar | null> {
+  try {
+    const sessionPath = getSessionPath(username);
+    const data = await readFile(sessionPath, "utf-8");
+    return JSON.parse(data) as CookieJar;
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
   const program = Effect.gen(function* () {
-    const fsService = yield* FileSystem.FileSystem;
     const ctx = yield* makeInstaloaderContext({ quiet: false });
 
-    const sessionFile = getDefaultSessionFilename("zakaria_._ben");
-    const sessionExists = yield* fsService.exists(sessionFile);
-    if (sessionExists) {
-      yield* pipe(
-        loadSessionFromFileEffect(ctx, "zakaria_._ben"),
-        Effect.provide(PlatformLayer)
-      );
+    const sessionData = yield* Effect.promise(() => loadSessionFromFile("zakaria_._ben"));
+    if (sessionData) {
+      yield* ctx.loadSession("zakaria_._ben", sessionData);
       console.log("Session loaded\n");
     } else {
       console.log("No session file found, running anonymously\n");
@@ -104,7 +113,7 @@ async function main() {
   });
 
   try {
-    await Effect.runPromise(program.pipe(Effect.provide(PlatformLayer)));
+    await Effect.runPromise(program);
   } catch (err) {
     console.error("Error:", err instanceof Error ? err.message : err);
     process.exit(1);

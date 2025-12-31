@@ -1,12 +1,9 @@
 import { Effect, Layer, Option, pipe, Stream } from "effect";
 import { FileSystem, Path, Error as PlatformError } from "@effect/platform";
 import { NodeFileSystem, NodePath } from "@effect/platform-node";
-import * as path from "node:path";
-import * as os from "node:os";
 import {
   type InstaloaderContextOptions,
   type InstaloaderContextShape,
-  type CookieJar,
   type ContextError,
 } from "./context.ts";
 import {
@@ -53,73 +50,6 @@ export type InstaloaderError = ContextError | AbortDownloadError;
 type FileError = PlatformError.PlatformError;
 
 export const PlatformLayer = Layer.merge(NodeFileSystem.layer, NodePath.layer);
-
-// ============================================================================
-// Pure Effect Functions
-// ============================================================================
-
-export const getConfigDirEffect = Effect.gen(function* () {
-  const pathService = yield* Path.Path;
-  if (process.platform === "win32") {
-    const localAppData = process.env["LOCALAPPDATA"];
-    if (localAppData) {
-      return pathService.join(localAppData, "Instaloader");
-    }
-    return pathService.join(os.tmpdir(), `.instaloader-${os.userInfo().username}`);
-  }
-  const xdgConfig = process.env["XDG_CONFIG_HOME"] ?? pathService.join(os.homedir(), ".config");
-  return pathService.join(xdgConfig, "instaloader");
-});
-
-export const getDefaultSessionFilenameEffect = (
-  username: string
-): Effect.Effect<string, never, Path.Path> =>
-  Effect.gen(function* () {
-    const pathService = yield* Path.Path;
-    const configDir = yield* getConfigDirEffect;
-    return pathService.join(configDir, `session-${username}`);
-  });
-
-export const saveSessionToFileEffect = (
-  context: InstaloaderContextShape,
-  filename?: string
-): Effect.Effect<void, LoginRequiredError | FileError, FileSystem.FileSystem | Path.Path> =>
-  Effect.gen(function* () {
-    const fsService = yield* FileSystem.FileSystem;
-    const pathService = yield* Path.Path;
-
-    const isLoggedIn = yield* context.isLoggedIn;
-    if (!isLoggedIn) {
-      return yield* Effect.fail(new LoginRequiredError({ message: "Login required." }));
-    }
-
-    const username = yield* context.getUsername;
-    const targetFilename = filename ?? (yield* getDefaultSessionFilenameEffect(username!));
-    const dirname = pathService.dirname(targetFilename);
-
-    const dirExists = yield* fsService.exists(dirname);
-    if (!dirExists) {
-      yield* fsService.makeDirectory(dirname, { recursive: true });
-    }
-
-    const sessionData = yield* context.saveSession;
-    yield* fsService.writeFileString(targetFilename, JSON.stringify(sessionData));
-    yield* context.log(`Saved session to ${targetFilename}.`);
-  });
-
-export const loadSessionFromFileEffect = (
-  context: InstaloaderContextShape,
-  username: string,
-  filename?: string
-): Effect.Effect<void, FileError, FileSystem.FileSystem | Path.Path> =>
-  Effect.gen(function* () {
-    const fsService = yield* FileSystem.FileSystem;
-    const targetFilename = filename ?? (yield* getDefaultSessionFilenameEffect(username));
-    const data = yield* fsService.readFileString(targetFilename);
-    const sessionData = JSON.parse(data) as CookieJar;
-    yield* context.loadSession(username, sessionData);
-    yield* context.log(`Loaded session from ${targetFilename}.`);
-  });
 
 export const downloadFileEffect = (
   context: InstaloaderContextShape,
@@ -201,27 +131,6 @@ export const defaultConfig: InstaloaderConfig = {
   slideStart: 0,
   slideEnd: -1,
 };
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-function getConfigDir(): string {
-  if (process.platform === "win32") {
-    const localAppData = process.env["LOCALAPPDATA"];
-    if (localAppData) {
-      return path.join(localAppData, "Instaloader");
-    }
-    return path.join(os.tmpdir(), `.instaloader-${os.userInfo().username}`);
-  }
-  const xdgConfig = process.env["XDG_CONFIG_HOME"] ?? path.join(os.homedir(), ".config");
-  return path.join(xdgConfig, "instaloader");
-}
-
-export function getDefaultSessionFilename(username: string): string {
-  const configDir = getConfigDir();
-  return path.join(configDir, `session-${username}`);
-}
 
 export function formatStringContainsKey(formatString: string, key: string): boolean {
   const pattern = new RegExp(`\\{${key}(?:\\.[^}]*)?\\}`, "g");

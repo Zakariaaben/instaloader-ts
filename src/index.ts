@@ -26,6 +26,14 @@ export {
   type Profile,
   type Post,
   type PostError,
+  type ProfileFetchError,
+  type PostLocation as ClientPostLocation,
+  type SidecarNode,
+  type StoryItem,
+  type Story,
+  type Highlight,
+  type Hashtag,
+  type SessionData,
 } from "./client/index.ts";
 
 // -----------------------------------------------------------------------------
@@ -93,13 +101,8 @@ export {
 
 // Core utilities that don't conflict
 export {
-  getDefaultSessionFilename,
   formatStringContainsKey,
   PlatformLayer,
-  getConfigDirEffect,
-  getDefaultSessionFilenameEffect,
-  saveSessionToFileEffect,
-  loadSessionFromFileEffect,
   downloadFileEffect,
 } from "./core/instaloader.ts";
 

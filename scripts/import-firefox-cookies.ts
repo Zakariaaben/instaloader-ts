@@ -1,16 +1,27 @@
 #!/usr/bin/env bun
 import { Database } from "bun:sqlite";
 import * as fs from "fs";
+import { writeFile, mkdir } from "node:fs/promises";
 import * as path from "path";
 import * as os from "os";
-import { Effect, pipe } from "effect";
+import { Effect } from "effect";
 import {
   makeInstaloaderContext,
-  saveSessionToFileEffect,
-  PlatformLayer,
   type CookieJar,
   type InstaloaderContextShape,
 } from "../src/index.ts";
+
+function getSessionPath(username: string): string {
+  const configDir = process.env["XDG_CONFIG_HOME"] ?? path.join(os.homedir(), ".config");
+  return path.join(configDir, "instaloader", `session-${username}`);
+}
+
+async function saveSessionToFile(sessionData: CookieJar, username: string): Promise<void> {
+  const sessionPath = getSessionPath(username);
+  await mkdir(path.dirname(sessionPath), { recursive: true });
+  await writeFile(sessionPath, JSON.stringify(sessionData));
+  console.log(`Session saved to ${sessionPath}`);
+}
 
 function findFirefoxCookiesDb(): string | null {
   const homeDir = os.homedir();
@@ -113,12 +124,10 @@ async function main() {
     
     yield* ctx.loadSession(loggedInUser, cookies);
     
-    yield* pipe(
-      saveSessionToFileEffect(ctx),
-      Effect.provide(PlatformLayer)
-    );
+    const sessionData = yield* ctx.saveSession;
+    yield* Effect.promise(() => saveSessionToFile(sessionData, loggedInUser));
     
-    console.log(`\nSession saved! You can now run logged-in tests.`);
+    console.log(`\nYou can now run logged-in tests.`);
     console.log(`\nTo update the test file, set OWN_USERNAME to: ${loggedInUser}`);
     
     yield* ctx.close;

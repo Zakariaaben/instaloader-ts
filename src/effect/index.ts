@@ -1,12 +1,7 @@
 export {
   type InstaloaderOptions,
-  getDefaultSessionFilename,
   formatStringContainsKey,
   PlatformLayer,
-  getConfigDirEffect,
-  getDefaultSessionFilenameEffect,
-  saveSessionToFileEffect,
-  loadSessionFromFileEffect,
   downloadFileEffect,
 } from "../core/instaloader.ts";
 

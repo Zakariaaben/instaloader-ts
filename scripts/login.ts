@@ -1,11 +1,24 @@
 #!/usr/bin/env bun
+import { writeFile, mkdir } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 import { Effect, pipe, Exit, Cause } from "effect";
 import {
   makeInstaloaderContext,
-  saveSessionToFileEffect,
-  PlatformLayer,
   TwoFactorAuthRequiredError,
 } from "../src/index.ts";
+
+function getSessionPath(username: string): string {
+  const configDir = process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config");
+  return join(configDir, "instaloader", `session-${username}`);
+}
+
+async function saveSessionToFile(sessionData: Record<string, string>, username: string): Promise<void> {
+  const sessionPath = getSessionPath(username);
+  await mkdir(dirname(sessionPath), { recursive: true });
+  await writeFile(sessionPath, JSON.stringify(sessionData));
+  console.log(`Session saved to ${sessionPath}`);
+}
 
 function readPassword(): Promise<string> {
   return new Promise<string>((resolve) => {
@@ -73,10 +86,8 @@ async function main() {
     
     if (Exit.isFailure(loginResult)) {
       const cause = loginResult.cause;
-      const defects = Cause.defects(cause);
       const failures = Cause.failures(cause);
       
-      // Check if it's a 2FA error
       let is2FA = false;
       for (const failure of failures) {
         if (failure instanceof TwoFactorAuthRequiredError) {
@@ -91,18 +102,15 @@ async function main() {
         yield* ctx.twoFactorLogin(code);
         console.log("2FA login successful!");
       } else {
-        // Re-fail with the original cause
         return yield* Effect.failCause(cause);
       }
     } else {
       console.log("Login successful!");
     }
     
-    yield* pipe(
-      saveSessionToFileEffect(ctx),
-      Effect.provide(PlatformLayer)
-    );
-    console.log("Session saved. You can now run logged-in tests.");
+    const sessionData = yield* ctx.saveSession;
+    yield* Effect.promise(() => saveSessionToFile(sessionData, username));
+    console.log("You can now run logged-in tests.");
     
     yield* ctx.close;
   });

@@ -1,13 +1,32 @@
 #!/usr/bin/env bun
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import {
   Instaloader,
   isErr,
   isSome,
+  type SessionData,
 } from "../src/index.ts";
 
 const SESSION_USERNAME = "zakaria_._ben";
 const USERNAME = "rifka.bjm";
 const MAX_POSTS = 10;
+
+function getSessionPath(username: string): string {
+  const configDir = process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config");
+  return join(configDir, "instaloader", `session-${username}`);
+}
+
+async function loadSessionFromFile(username: string): Promise<SessionData | null> {
+  try {
+    const sessionPath = getSessionPath(username);
+    const data = await readFile(sessionPath, "utf-8");
+    return JSON.parse(data) as SessionData;
+  } catch {
+    return null;
+  }
+}
 
 async function main() {
   const loaderResult = await Instaloader.create({ quiet: false });
@@ -17,13 +36,17 @@ async function main() {
   }
   const loader = loaderResult.value;
 
-  const sessionResult = await loader.loadSession(SESSION_USERNAME);
-  if (isErr(sessionResult)) {
-    console.error("Failed to load session:", sessionResult.error);
-    console.log("Continuing without authentication...\n");
+  const sessionData = await loadSessionFromFile(SESSION_USERNAME);
+  if (sessionData) {
+    const result = await loader.loadSessionData(SESSION_USERNAME, sessionData);
+    if (isErr(result)) {
+      console.error("Failed to load session");
+    } else {
+      console.log(`Loaded session for @${SESSION_USERNAME}`);
+      console.log(`Logged in: ${await loader.isLoggedIn()}\n`);
+    }
   } else {
-    console.log(`Loaded session for @${SESSION_USERNAME}`);
-    console.log(`Logged in: ${await loader.isLoggedIn()}\n`);
+    console.log("No session file found, continuing without authentication...\n");
   }
 
   console.log(`Fetching posts from @${USERNAME}...\n`);

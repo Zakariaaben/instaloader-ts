@@ -55,8 +55,12 @@ export type {
   Profile,
   Post,
   PostError,
+  ProfileFetchError,
+  PostLocation,
   SidecarNode,
+  StoryItem,
   Story,
   Highlight,
   Hashtag,
+  SessionData,
 } from "./types";
