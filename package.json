@@ -1,0 +1,43 @@
+{
+  "name": "instaloader-ts",
+  "version": "0.1.0",
+  "description": "TypeScript port of instaloader - Download pictures (or videos) along with their captions and other metadata from Instagram",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/instaloader-ts.git"
+  },
+  "keywords": [
+    "instagram",
+    "downloader",
+    "scraper",
+    "typescript",
+    "bun"
+  ],
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "build": "bun build src/index.ts --outdir ./dist --target node",
+    "test": "bun test",
+    "lint": "bunx biome check .",
+    "format": "bunx biome format --write .",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "dependencies": {}
+}
