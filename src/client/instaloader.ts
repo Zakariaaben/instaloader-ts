@@ -184,6 +184,20 @@ function createPostWrapper(
       }
       return Ok(createProfileWrapper(context, result.right));
     },
+
+    async getSponsorUsers(): Promise<Profile[]> {
+      const result = await Effect.runPromise(
+        PostEffect.getSponsorUsers(postData)
+      );
+      return result.map((profileData) => createProfileWrapper(context, profileData));
+    },
+
+    async getCoauthorProducers(): Promise<Profile[]> {
+      const result = await Effect.runPromise(
+        PostEffect.getCoauthorProducers(postData)
+      );
+      return result.map((profileData) => createProfileWrapper(context, profileData));
+    },
   };
 }
 

@@ -843,6 +843,20 @@ export const getSponsorUsers = (
     });
   });
 
+export const getCoauthorProducers = (
+  post: PostData
+): Effect.Effect<ProfileData[], never> =>
+  Effect.gen(function* () {
+    const coauthorsOpt = fieldOption<JsonNode[]>(post, "coauthor_producers");
+    if (Option.isNone(coauthorsOpt)) {
+      return [];
+    }
+    const coauthors = coauthorsOpt.value;
+    return coauthors.map((coauthor) => {
+      return { node: coauthor as JsonNode, iphoneStruct: null };
+    });
+  });
+
 export const getLocation = (
   context: InstaloaderContextShape,
   post: PostData
