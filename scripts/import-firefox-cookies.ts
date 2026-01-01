@@ -25,13 +25,26 @@ async function saveSessionToFile(sessionData: CookieJar, username: string): Prom
 
 function findFirefoxCookiesDb(): string | null {
   const homeDir = os.homedir();
-  const firefoxDir = path.join(homeDir, ".mozilla", "firefox");
+  
+  // Windows path: %APPDATA%\Mozilla\Firefox\Profiles\
+  const windowsFirefoxDir = path.join(homeDir, "AppData", "Roaming", "Mozilla", "Firefox", "Profiles");
+  
+  // Linux/Mac path: ~/.mozilla/firefox
+  const unixFirefoxDir = path.join(homeDir, ".mozilla", "firefox");
+  
+  // Try Windows first, then Unix
+  const firefoxDir = fs.existsSync(windowsFirefoxDir) ? windowsFirefoxDir : unixFirefoxDir;
   
   if (!fs.existsSync(firefoxDir)) {
+    console.error("Firefox directory not found. Tried:");
+    console.error(`  Windows: ${windowsFirefoxDir}`);
+    console.error(`  Unix: ${unixFirefoxDir}`);
     return null;
   }
 
   const profiles = fs.readdirSync(firefoxDir);
+  
+  // Try default-release or default profiles first
   for (const profile of profiles) {
     if (profile.endsWith(".default-release") || profile.endsWith(".default")) {
       const cookiesPath = path.join(firefoxDir, profile, "cookies.sqlite");
@@ -41,6 +54,7 @@ function findFirefoxCookiesDb(): string | null {
     }
   }
 
+  // Fallback: try any profile
   for (const profile of profiles) {
     const cookiesPath = path.join(firefoxDir, profile, "cookies.sqlite");
     if (fs.existsSync(cookiesPath)) {
@@ -52,7 +66,7 @@ function findFirefoxCookiesDb(): string | null {
 }
 
 function getInstagramCookies(dbPath: string): CookieJar {
-  const tempPath = `/tmp/firefox_cookies_${Date.now()}.sqlite`;
+  const tempPath = path.join(os.tmpdir(), `firefox_cookies_${Date.now()}.sqlite`);
   fs.copyFileSync(dbPath, tempPath);
   
   const db = new Database(tempPath, { readonly: true });
