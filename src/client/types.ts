@@ -118,6 +118,10 @@ export interface Post {
   getLocation(): Promise<Result<PostError | LoginRequiredError, PostLocation | null>>;
   /** Get post owner's profile */
   getOwnerProfile(): Promise<Result<PostError, Profile>>;
+  /** Get sponsored brand/business profiles */
+  getSponsorUsers(): Promise<Profile[]>;
+  /** Get coauthor/collaborator profiles */
+  getCoauthorProducers(): Promise<Profile[]>;
 }
 
 /**

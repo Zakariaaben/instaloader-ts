@@ -103,6 +103,7 @@ export {
   getVideoUrl as postGetVideoUrl,
   getSidecarNodes as postGetSidecarNodes,
   getSponsorUsers as postGetSponsorUsers,
+  getCoauthorProducers as postGetCoauthorProducers,
   getLocation as postGetLocation,
   type PostData,
   type PostError,
